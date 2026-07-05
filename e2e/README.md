@@ -18,7 +18,7 @@ The default run maps one package manager to each fixture:
 | --- | --- | --- |
 | `next14-root-app-npm` | npm | Next 14 App Router with top-level `app/` |
 | `next15-src-app-single-schema-config-pnpm` | pnpm | Next 15 `src/app/` and single-file Drizzle schema config |
-| `next16-src-flow-app-bun` | bun | Next 16 `src/app/`, proxy detection, and Workflow config from `add inflow` |
+| `next16-src-flow-app-bun` | bun | Next 16 `src/app/`, proxy detection, Workflow config from `add inflow`, and packaged `sendUpdate()` fallback behavior |
 
 Run one scenario and keep the temp project for inspection:
 
@@ -54,4 +54,6 @@ without committing full app lockfiles or `node_modules`:
 - `next15-src-app`: Next 15 App Router with `src/app/` and an existing
   single-file Drizzle schema config.
 - `next16-src-flow-app`: Next 16 App Router with `src/app/`, proxy detection,
-  and a flow component that exercises Workflow `next.config.ts` integration.
+  a flow component that exercises Workflow `next.config.ts` integration, and a
+  packaged runtime assertion that `sendUpdate()` does not fail when the Workflow
+  writable stream is unavailable.

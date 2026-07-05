@@ -175,6 +175,37 @@ const scenarioTemplates = [
         text: "export default withWorkflow(nextConfig);",
       },
     ],
+    runtimeChecks: [
+      {
+        name: "sendUpdate-noops-without-workflow-writable",
+        script: `
+import { configureWorkflowRuntime } from "khotan-data/factory";
+
+configureWorkflowRuntime({
+  getWritable() {
+    throw new Error("getWritable() can only be called inside a workflow or step function");
+  },
+});
+
+async function fetchRecords() {
+  "use step";
+  const { sendUpdate } = await import("khotan-data/factory");
+
+  await sendUpdate({
+    message: "Fetching records",
+    progress: 5,
+  });
+
+  return { extracted: 1 };
+}
+
+const result = await fetchRecords();
+if (result.extracted !== 1) {
+  throw new Error("Expected sendUpdate to allow the step to complete");
+}
+`,
+      },
+    ],
   },
 ];
 
@@ -376,6 +407,16 @@ function installConsumer(scenario, projectDir, tarballPath) {
   assertPackageManagerLockfile(projectDir, scenario.packageManager);
 }
 
+function runRuntimeChecks(scenario, projectDir) {
+  for (const check of scenario.runtimeChecks ?? []) {
+    console.log(`runtime check: ${check.name}`);
+    run("node", ["--input-type=module", "--eval", check.script], {
+      cwd: projectDir,
+      timeout: 120_000,
+    });
+  }
+}
+
 function runScenario(scenario, tarballPath, tmpRoot) {
   console.log(`\n== ${scenarioId(scenario)} ==`);
   const projectDir = copyFixture(scenario, tmpRoot);
@@ -406,6 +447,7 @@ function runScenario(scenario, tarballPath, tmpRoot) {
   for (const check of scenario.expectedContent) {
     assertIncludes(projectDir, check.file, check.text);
   }
+  runRuntimeChecks(scenario, projectDir);
 
   const packageManager = packageManagers[scenario.packageManager];
   runPackageManager(scenario.packageManager, packageManager.typecheckArgs(), {

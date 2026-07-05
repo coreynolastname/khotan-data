@@ -117,20 +117,26 @@ export async function sendUpdate(
   update: KhotanRunUpdate | string,
   options: { namespace?: string } = {},
 ): Promise<void> {
-  const getWritable = await importWorkflowGetWritable();
-  const writable = getWritable<string>(options);
-  const writer = writable.getWriter();
   const payload =
     typeof update === "string"
       ? { type: "log", message: update }
       : { type: "progress", ...update };
 
   try {
-    await writer.write(
-      `${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n`,
-    );
-  } finally {
-    writer.releaseLock();
+    const getWritable = await importWorkflowGetWritable();
+    const writable = getWritable<string>(options);
+    const writer = writable.getWriter();
+
+    try {
+      await writer.write(
+        `${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n`,
+      );
+    } finally {
+      writer.releaseLock();
+    }
+  } catch {
+    // Progress updates are best-effort. Missing or unavailable Workflow streams
+    // must not fail durable sync steps.
   }
 }
 

@@ -893,6 +893,41 @@ describe("khotan factory", () => {
     expect(typeof payload["timestamp"]).toBe("string");
   });
 
+  it("does not fail workflow steps when the workflow writable stream is unavailable", async () => {
+    const getWritable = vi.fn(() => {
+      throw new Error(
+        "getWritable() can only be called inside a workflow or step function",
+      );
+    });
+
+    configureWorkflowRuntime({ getWritable });
+
+    await expect(
+      sendUpdate({ message: "Fetching records", progress: 5 }),
+    ).resolves.toBeUndefined();
+    expect(getWritable).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail workflow steps when the workflow stream rejects writes", async () => {
+    const getWritable = vi.fn(
+      () =>
+        new WritableStream<string>({
+          write() {
+            throw new Error("workflow stream closed");
+          },
+        }),
+    );
+
+    configureWorkflowRuntime({ getWritable });
+
+    await expect(sendUpdate("relayed products")).resolves.toBeUndefined();
+    expect(getWritable).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail when no workflow writable helper is configured", async () => {
+    await expect(sendUpdate("relayed products")).resolves.toBeUndefined();
+  });
+
   describe("registration validation", () => {
     it("throws on duplicate plug names", () => {
       const plugs: PlugRegistration[] = [
