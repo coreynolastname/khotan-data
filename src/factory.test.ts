@@ -86,11 +86,27 @@ interface StoredWebhookEvent {
   id: string;
   wireId: string;
   webhookHandlerId: string;
-  khotanRunId: string;
+  khotanRunId: string | null;
   eventType: string;
   payload: Record<string, unknown>;
   headers: Record<string, string>;
+  status:
+    | "received"
+    | "queued"
+    | "processing"
+    | "processed"
+    | "ignored"
+    | "failed"
+    | "duplicate";
+  idempotencyKey: string | null;
+  dedupeKey: string | null;
+  duplicateOfWebhookEventId: string | null;
+  attempts: number;
+  processingStartedAt: Date | null;
+  completedAt: Date | null;
+  error: string | null;
   receivedAt: Date;
+  updatedAt: Date;
 }
 
 interface StoredCache {
@@ -862,18 +878,77 @@ function createMockAdapter(): KhotanAdapter {
     }),
 
     insertWebhookEvent: vi.fn(async (event) => {
+      const dedupeKey = event.dedupeKey ?? null;
+      if (dedupeKey) {
+        const existing = [...webhookEventStore.values()].find(
+          (row) =>
+            row.webhookHandlerId === event.webhookHandlerId &&
+            row.dedupeKey === dedupeKey,
+        );
+        if (existing) {
+          const id = `webhook-event-${webhookEventStore.size + 1}`;
+          webhookEventStore.set(id, {
+            id,
+            wireId: event.wireId,
+            webhookHandlerId: event.webhookHandlerId,
+            khotanRunId: null,
+            eventType: event.eventType,
+            payload: event.payload,
+            headers: event.headers,
+            status: "duplicate",
+            idempotencyKey: event.idempotencyKey ?? null,
+            dedupeKey: null,
+            duplicateOfWebhookEventId: existing.id,
+            attempts: 0,
+            processingStartedAt: null,
+            completedAt: new Date(),
+            error: "Duplicate webhook event",
+            receivedAt: new Date(),
+            updatedAt: new Date(),
+          });
+          return {
+            id,
+            duplicate: true,
+            duplicateOfWebhookEventId: existing.id,
+          };
+        }
+      }
       const id = `webhook-event-${webhookEventStore.size + 1}`;
       webhookEventStore.set(id, {
         id,
         wireId: event.wireId,
         webhookHandlerId: event.webhookHandlerId,
-        khotanRunId: event.khotanRunId,
+        khotanRunId: event.khotanRunId ?? null,
         eventType: event.eventType,
         payload: event.payload,
         headers: event.headers,
+        status: event.status ?? "received",
+        idempotencyKey: event.idempotencyKey ?? null,
+        dedupeKey,
+        duplicateOfWebhookEventId: event.duplicateOfWebhookEventId ?? null,
+        attempts: 0,
+        processingStartedAt: event.processingStartedAt ?? null,
+        completedAt: event.completedAt ?? null,
+        error: event.error ?? null,
         receivedAt: new Date(),
+        updatedAt: new Date(),
       });
-      return { id };
+      return {
+        id,
+        duplicate: event.status === "duplicate",
+        duplicateOfWebhookEventId: event.duplicateOfWebhookEventId ?? null,
+      };
+    }),
+
+    getWebhookEvent: vi.fn(async (eventId: string) => {
+      return webhookEventStore.get(eventId) ?? null;
+    }),
+
+    updateWebhookEvent: vi.fn(async (eventId, updates) => {
+      const event = webhookEventStore.get(eventId);
+      if (event) {
+        Object.assign(event, updates, { updatedAt: new Date() });
+      }
     }),
 
     listWebhookEventsPage: vi.fn(
@@ -884,17 +959,32 @@ function createMockAdapter(): KhotanAdapter {
         return {
           items: rows.slice(0, limit).map((event) => ({
             ...event,
-            handlerName: null,
-            handlerType: null,
-            plugName: null,
-            workflowRunId:
-              runStore.get(event.khotanRunId)?.workflowRunId ?? null,
-            runStatus: runStore.get(event.khotanRunId)?.status ?? null,
-            runStartedAt: runStore.get(event.khotanRunId)?.startedAt ?? null,
-            runCompletedAt:
-              runStore.get(event.khotanRunId)?.completedAt ?? null,
-            runDurationMs: runStore.get(event.khotanRunId)?.durationMs ?? null,
-            runError: runStore.get(event.khotanRunId)?.error ?? null,
+            handlerName:
+              webhookHandlerStore.get(event.webhookHandlerId)?.name ?? null,
+            handlerType:
+              webhookHandlerStore.get(event.webhookHandlerId)?.type ?? null,
+            plugName:
+              plugStore.get(
+                wireStore.get(event.wireId)?.plugId ?? "__missing__",
+              )?.name ?? null,
+            workflowRunId: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.workflowRunId ?? null)
+              : null,
+            runStatus: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.status ?? null)
+              : null,
+            runStartedAt: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.startedAt ?? null)
+              : null,
+            runCompletedAt: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.completedAt ?? null)
+              : null,
+            runDurationMs: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.durationMs ?? null)
+              : null,
+            runError: event.khotanRunId
+              ? (runStore.get(event.khotanRunId)?.error ?? null)
+              : null,
           })),
           hasMore: rows.length > limit,
         };
@@ -3922,6 +4012,331 @@ describe("khotan factory", () => {
       await waitForBackgroundTasks();
       await waitForBackgroundTasks();
       expect(catchWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it("deduplicates idempotent webhook events and records duplicate status rows", async () => {
+      const catchWorkflow = vi.fn(async () => ({ created: 1 }));
+      __setWorkflowStartForTests(
+        vi.fn(async (workflowFn, args) => ({
+          runId: `workflow-run-${String(vi.mocked(catchWorkflow).mock.calls.length + 1)}`,
+          returnValue: Promise.resolve(workflowFn(args[0])),
+        })),
+      );
+
+      const instance = khotan({
+        adapter,
+        authorize: false,
+        plugs: [
+          {
+            name: "shopify",
+            plug: {
+              baseUrl: "https://shopify.example",
+              authType: "custom",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            wires: [
+              {
+                events: ["order.created"],
+                onSubscribe: vi.fn(async () => ({ remoteId: "remote-1" })),
+                onUnsubscribe: vi.fn(async () => undefined),
+                onVerify: vi.fn(async () => true),
+              },
+            ],
+            catches: [
+              {
+                type: "catch",
+                name: "shopify-orders",
+                events: ["order.created"],
+                idempotencyKey: "id",
+                workflow: catchWorkflow,
+              },
+            ],
+          },
+        ],
+      });
+
+      const body = { type: "order.created", id: "evt-1" };
+      const first = await instance.handler(
+        makeRequest("/api/khotan/webhook/shopify", "POST", body),
+      );
+      await waitForBackgroundTasks();
+      const second = await instance.handler(
+        makeRequest("/api/khotan/webhook/shopify", "POST", body),
+      );
+
+      expect(first.status).toBe(202);
+      expect(second.status).toBe(202);
+      await waitForBackgroundTasks();
+      await waitForBackgroundTasks();
+
+      expect(catchWorkflow).toHaveBeenCalledTimes(1);
+
+      const eventsRes = await instance.handler(
+        makeRequest("/api/khotan/webhook-events?limit=10"),
+      );
+      const data = (await eventsRes.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      const processed = data.items.find(
+        (item) => item["status"] === "processed",
+      );
+      const duplicate = data.items.find(
+        (item) => item["status"] === "duplicate",
+      );
+
+      expect(processed).toMatchObject({
+        handlerName: "shopify-orders",
+        idempotencyKey: "evt-1",
+        attempts: 1,
+        runStatus: "completed",
+      });
+      expect(duplicate).toMatchObject({
+        handlerName: "shopify-orders",
+        idempotencyKey: "evt-1",
+        khotanRunId: null,
+        runStatus: null,
+        error: "Duplicate webhook event",
+      });
+      expect(duplicate?.["duplicateOfWebhookEventId"]).toBe(processed?.["id"]);
+    });
+
+    it("finalizes catch and pass runs from workflow terminal results", async () => {
+      const catchWorkflow = vi.fn(async () => ({
+        created: 2,
+        metadata: { handler: "catch" },
+      }));
+      const passWorkflow = vi.fn(async () => ({
+        status: "failed" as const,
+        failed: 1,
+        error: "slack unavailable",
+        metadata: { handler: "pass" },
+      }));
+      __setWorkflowStartForTests(
+        vi.fn(async (workflowFn, args) => ({
+          runId: `workflow-run-${crypto.randomUUID()}`,
+          returnValue: Promise.resolve(workflowFn(args[0])),
+        })),
+      );
+
+      const instance = khotan({
+        adapter,
+        authorize: false,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://stripe.example",
+              authType: "custom",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            wires: [
+              {
+                events: ["invoice.paid"],
+                onSubscribe: vi.fn(async () => ({ remoteId: "remote-1" })),
+                onUnsubscribe: vi.fn(async () => undefined),
+                onVerify: vi.fn(async () => true),
+              },
+            ],
+            catches: [
+              {
+                type: "catch",
+                name: "stripe-invoices",
+                events: ["invoice.paid"],
+                workflow: catchWorkflow,
+              },
+            ],
+            passes: [
+              {
+                type: "pass",
+                name: "stripe-to-slack",
+                to: "slack",
+                events: ["invoice.paid"],
+                workflow: passWorkflow,
+              },
+            ],
+          },
+          {
+            name: "slack",
+            plug: {
+              baseUrl: "https://slack.example",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+        ],
+      });
+
+      const response = await instance.handler(
+        makeRequest("/api/khotan/webhook/stripe", "POST", {
+          type: "invoice.paid",
+          id: "evt-finalize-1",
+        }),
+      );
+
+      expect(response.status).toBe(202);
+      await waitForBackgroundTasks();
+      await waitForBackgroundTasks();
+
+      const eventsRes = await instance.handler(
+        makeRequest("/api/khotan/webhook-events?limit=10"),
+      );
+      const data = (await eventsRes.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      const catchEventRow = data.items.find(
+        (item) => item["handlerName"] === "stripe-invoices",
+      );
+      const passEventRow = data.items.find(
+        (item) => item["handlerName"] === "stripe-to-slack",
+      );
+
+      expect(catchEventRow).toMatchObject({
+        status: "processed",
+        runStatus: "completed",
+        attempts: 1,
+      });
+      expect(passEventRow).toMatchObject({
+        status: "failed",
+        runStatus: "failed",
+        attempts: 1,
+        error: "slack unavailable",
+      });
+
+      const runsRes = await instance.handler(makeRequest("/api/khotan/runs"));
+      const runs = (await runsRes.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(runs.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: catchEventRow?.["khotanRunId"],
+            status: "completed",
+            created: 2,
+            metadata: { handler: "catch" },
+          }),
+          expect.objectContaining({
+            id: passEventRow?.["khotanRunId"],
+            status: "failed",
+            failed: 1,
+            error: "slack unavailable",
+            metadata: { handler: "pass" },
+          }),
+        ]),
+      );
+    });
+
+    it("replays failed webhook events through the original handler", async () => {
+      const catchWorkflow = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("temporary outage"))
+        .mockResolvedValueOnce({ updated: 1 });
+      __setWorkflowStartForTests(
+        vi.fn(async (workflowFn, args) => ({
+          runId: `workflow-run-${String(catchWorkflow.mock.calls.length + 1)}`,
+          returnValue: Promise.resolve(workflowFn(args[0])),
+        })),
+      );
+
+      const instance = khotan({
+        adapter,
+        authorize: false,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://stripe.example",
+              authType: "custom",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            wires: [
+              {
+                events: ["invoice.paid"],
+                onSubscribe: vi.fn(async () => ({ remoteId: "remote-1" })),
+                onUnsubscribe: vi.fn(async () => undefined),
+                onVerify: vi.fn(async () => true),
+              },
+            ],
+            catches: [
+              {
+                type: "catch",
+                name: "stripe-invoices",
+                events: ["invoice.paid"],
+                idempotencyKey: "id",
+                workflow: catchWorkflow,
+              },
+            ],
+          },
+        ],
+      });
+
+      const response = await instance.handler(
+        makeRequest("/api/khotan/webhook/stripe", "POST", {
+          type: "invoice.paid",
+          id: "evt-replay-1",
+        }),
+      );
+      expect(response.status).toBe(202);
+      await waitForBackgroundTasks();
+      await waitForBackgroundTasks();
+
+      const failedEventsRes = await instance.handler(
+        makeRequest("/api/khotan/webhook-events?limit=10"),
+      );
+      const failedEvents = (await failedEventsRes.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      const failedEvent = failedEvents.items.find(
+        (item) => item["status"] === "failed",
+      );
+      expect(failedEvent).toMatchObject({
+        handlerName: "stripe-invoices",
+        error: "temporary outage",
+        runStatus: "failed",
+      });
+
+      const replay = await instance.handler(
+        makeRequest(
+          `/api/khotan/webhook-events/${String(failedEvent?.["id"])}/replay`,
+          "POST",
+        ),
+      );
+      expect(replay.status).toBe(202);
+      await waitForBackgroundTasks();
+      await waitForBackgroundTasks();
+
+      expect(catchWorkflow).toHaveBeenCalledTimes(2);
+      const replayedEventsRes = await instance.handler(
+        makeRequest("/api/khotan/webhook-events?limit=10"),
+      );
+      const replayedEvents = (await replayedEventsRes.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      const processedReplay = replayedEvents.items.find(
+        (item) =>
+          item["status"] === "processed" &&
+          item["duplicateOfWebhookEventId"] === failedEvent?.["id"],
+      );
+      expect(processedReplay).toMatchObject({
+        handlerName: "stripe-invoices",
+        runStatus: "completed",
+        attempts: 1,
+      });
     });
 
     it("POST /api/khotan/flows/:id/runs reconciles failed workflow runs", async () => {

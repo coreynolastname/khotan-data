@@ -33,8 +33,30 @@ import type {
   KhotanAdapter,
   KhotanPersistedRunUpdate,
   KhotanRunStatus,
+  WebhookEventStatus,
 } from "./types.js";
 import { serializeConnectField, deserializeConnectField } from "./helpers.js";
+
+function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? String(error.code) : "";
+  if (code === "23505") return true;
+  const message =
+    error instanceof Error
+      ? error.message
+      : "message" in error
+        ? String(error.message)
+        : "";
+  return /unique|duplicate/i.test(message);
+}
+
+function coerceLegacyDate(value: unknown): Date | null {
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    return new Date(value);
+  }
+  return null;
+}
 
 export type KhotanDrizzleDatabase<
   TQueryResult extends PgQueryResultHKT = PgQueryResultHKT,
@@ -1175,18 +1197,108 @@ export function drizzleAdapter<
     },
 
     async insertWebhookEvent(event) {
+      const insertEvent = async (overrides: {
+        status?: WebhookEventStatus;
+        dedupeKey?: string | null;
+        duplicateOfWebhookEventId?: string | null;
+        completedAt?: Date | null;
+        error?: string | null;
+      }) =>
+        db
+          .insert(khotanWebhookEvents)
+          .values({
+            wireId: event.wireId,
+            webhookHandlerId: event.webhookHandlerId,
+            khotanRunId: event.khotanRunId ?? null,
+            eventType: event.eventType,
+            payload: event.payload,
+            headers: event.headers,
+            status: overrides.status ?? event.status ?? "received",
+            idempotencyKey: event.idempotencyKey ?? null,
+            dedupeKey: overrides.dedupeKey ?? event.dedupeKey ?? null,
+            duplicateOfWebhookEventId:
+              overrides.duplicateOfWebhookEventId ??
+              event.duplicateOfWebhookEventId ??
+              null,
+            processingStartedAt: event.processingStartedAt ?? null,
+            completedAt: overrides.completedAt ?? event.completedAt ?? null,
+            error: overrides.error ?? event.error ?? null,
+          })
+          .returning({ id: khotanWebhookEvents.id });
+
+      const dedupeKey = event.dedupeKey ?? null;
+      if (!dedupeKey) {
+        const rows = await insertEvent({ dedupeKey: null });
+        return {
+          id: rows[0]!.id,
+          duplicate: event.status === "duplicate",
+          duplicateOfWebhookEventId: event.duplicateOfWebhookEventId ?? null,
+        };
+      }
+
+      try {
+        const rows = await insertEvent({ dedupeKey });
+        return {
+          id: rows[0]!.id,
+          duplicate: false,
+          duplicateOfWebhookEventId: null,
+        };
+      } catch (error) {
+        if (!isUniqueViolation(error)) {
+          throw error;
+        }
+
+        const existing = await db
+          .select({
+            id: khotanWebhookEvents.id,
+          })
+          .from(khotanWebhookEvents)
+          .where(
+            and(
+              eq(khotanWebhookEvents.webhookHandlerId, event.webhookHandlerId),
+              eq(khotanWebhookEvents.dedupeKey, dedupeKey),
+            ),
+          )
+          .limit(1);
+
+        const duplicateOfWebhookEventId = existing[0]?.id ?? null;
+        const rows = await insertEvent({
+          status: "duplicate",
+          dedupeKey: null,
+          duplicateOfWebhookEventId,
+          completedAt: new Date(),
+          error: "Duplicate webhook event",
+        });
+        return {
+          id: rows[0]!.id,
+          duplicate: true,
+          duplicateOfWebhookEventId,
+        };
+      }
+    },
+
+    async getWebhookEvent(eventId) {
       const rows = await db
-        .insert(khotanWebhookEvents)
-        .values({
-          wireId: event.wireId,
-          webhookHandlerId: event.webhookHandlerId,
-          khotanRunId: event.khotanRunId,
-          eventType: event.eventType,
-          payload: event.payload,
-          headers: event.headers,
+        .select()
+        .from(khotanWebhookEvents)
+        .where(eq(khotanWebhookEvents.id, eventId))
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
+    async updateWebhookEvent(eventId, updates) {
+      await db
+        .update(khotanWebhookEvents)
+        .set({
+          khotanRunId: updates.khotanRunId,
+          status: updates.status,
+          attempts: updates.attempts,
+          processingStartedAt: updates.processingStartedAt,
+          completedAt: updates.completedAt,
+          error: updates.error,
+          updatedAt: new Date(),
         })
-        .returning({ id: khotanWebhookEvents.id });
-      return { id: rows[0]!.id };
+        .where(eq(khotanWebhookEvents.id, eventId));
     },
 
     async listWebhookEventsPage({ limit, offset }) {
@@ -1194,11 +1306,20 @@ export function drizzleAdapter<
         id: string;
         wireId: string | null;
         webhookHandlerId: string | null;
-        khotanRunId: string;
+        khotanRunId: string | null;
         eventType: string;
         payload: Record<string, unknown>;
         headers: Record<string, string>;
+        status: WebhookEventStatus;
+        idempotencyKey: string | null;
+        dedupeKey: string | null;
+        duplicateOfWebhookEventId: string | null;
+        attempts: number;
+        processingStartedAt: Date | null;
+        completedAt: Date | null;
+        error: string | null;
         receivedAt: Date;
+        updatedAt: Date;
       }[];
 
       try {
@@ -1213,7 +1334,18 @@ export function drizzleAdapter<
         const isLegacyShapeError =
           message.includes(`column "wire_id" does not exist`) ||
           message.includes(`column "webhook_handler_id" does not exist`) ||
-          message.includes(`column "headers" does not exist`);
+          message.includes(`column "headers" does not exist`) ||
+          message.includes(`column "status" does not exist`) ||
+          message.includes(`column "idempotency_key" does not exist`) ||
+          message.includes(`column "dedupe_key" does not exist`) ||
+          message.includes(
+            `column "duplicate_of_webhook_event_id" does not exist`,
+          ) ||
+          message.includes(`column "attempts" does not exist`) ||
+          message.includes(`column "processing_started_at" does not exist`) ||
+          message.includes(`column "completed_at" does not exist`) ||
+          message.includes(`column "error" does not exist`) ||
+          message.includes(`column "updated_at" does not exist`);
 
         if (!isLegacyShapeError) {
           throw error;
@@ -1228,7 +1360,16 @@ export function drizzleAdapter<
             "event_type",
             "payload",
             '{}'::jsonb as "headers",
-            "received_at"
+            'processed'::text as "status",
+            null::text as "idempotency_key",
+            null::text as "dedupe_key",
+            null::text as "duplicate_of_webhook_event_id",
+            0::integer as "attempts",
+            null::timestamp with time zone as "processing_started_at",
+            null::timestamp with time zone as "completed_at",
+            null::text as "error",
+            "received_at",
+            "received_at" as "updated_at"
           from "khotan_webhook_events"
           order by "received_at" desc
           limit ${limit + 1}
@@ -1248,7 +1389,10 @@ export function drizzleAdapter<
             typeof row["webhook_handler_id"] === "string"
               ? row["webhook_handler_id"]
               : null,
-          khotanRunId: String(row["khotan_run_id"]),
+          khotanRunId:
+            typeof row["khotan_run_id"] === "string"
+              ? row["khotan_run_id"]
+              : null,
           eventType: String(row["event_type"]),
           payload:
             row["payload"] && typeof row["payload"] === "object"
@@ -1258,10 +1402,38 @@ export function drizzleAdapter<
             row["headers"] && typeof row["headers"] === "object"
               ? (row["headers"] as Record<string, string>)
               : {},
+          status:
+            row["status"] === "received" ||
+            row["status"] === "queued" ||
+            row["status"] === "processing" ||
+            row["status"] === "processed" ||
+            row["status"] === "ignored" ||
+            row["status"] === "failed" ||
+            row["status"] === "duplicate"
+              ? row["status"]
+              : "processed",
+          idempotencyKey:
+            typeof row["idempotency_key"] === "string"
+              ? row["idempotency_key"]
+              : null,
+          dedupeKey:
+            typeof row["dedupe_key"] === "string" ? row["dedupe_key"] : null,
+          duplicateOfWebhookEventId:
+            typeof row["duplicate_of_webhook_event_id"] === "string"
+              ? row["duplicate_of_webhook_event_id"]
+              : null,
+          attempts: typeof row["attempts"] === "number" ? row["attempts"] : 0,
+          processingStartedAt: coerceLegacyDate(row["processing_started_at"]),
+          completedAt: coerceLegacyDate(row["completed_at"]),
+          error: typeof row["error"] === "string" ? row["error"] : null,
           receivedAt:
             row["received_at"] instanceof Date
               ? row["received_at"]
               : new Date(String(row["received_at"])),
+          updatedAt:
+            row["updated_at"] instanceof Date
+              ? row["updated_at"]
+              : new Date(String(row["updated_at"])),
         }));
       }
 
@@ -1325,7 +1497,7 @@ export function drizzleAdapter<
           const handler = row.webhookHandlerId
             ? handlerMap.get(row.webhookHandlerId)
             : undefined;
-          const run = runMap.get(row.khotanRunId);
+          const run = row.khotanRunId ? runMap.get(row.khotanRunId) : null;
           return {
             ...row,
             handlerName: handler?.name ?? null,

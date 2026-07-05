@@ -21,10 +21,24 @@ interface WebhookEventItem {
   id: string;
   wireId: string | null;
   webhookHandlerId: string | null;
-  khotanRunId: string;
+  khotanRunId: string | null;
   eventType: string;
   payload: Record<string, unknown>;
   headers: Record<string, string>;
+  status:
+    | "received"
+    | "queued"
+    | "processing"
+    | "processed"
+    | "ignored"
+    | "failed"
+    | "duplicate";
+  idempotencyKey: string | null;
+  duplicateOfWebhookEventId: string | null;
+  attempts: number;
+  processingStartedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
   receivedAt: string;
   handlerName: string | null;
   handlerType: "catch" | "pass" | null;
@@ -58,6 +72,12 @@ interface PageResponse<T> {
 }
 
 const statusVariant = {
+  received: "outline",
+  queued: "secondary",
+  processing: "secondary",
+  processed: "default",
+  ignored: "outline",
+  duplicate: "outline",
   pending: "outline",
   running: "secondary",
   completed: "default",
@@ -220,6 +240,10 @@ function WebhookEventDetails({ item }: { item: WebhookEventItem }) {
           <DetailField label="Received">
             {formatLocalDateTime(item.receivedAt)}
           </DetailField>
+          <DetailField label="Event status">
+            <Badge variant={statusVariant[item.status]}>{item.status}</Badge>
+          </DetailField>
+          <DetailField label="Attempts">{item.attempts}</DetailField>
         </div>
 
         <div className="space-y-3 rounded-md border bg-background p-3">
@@ -242,7 +266,11 @@ function WebhookEventDetails({ item }: { item: WebhookEventItem }) {
 
         <div className="space-y-3 rounded-md border bg-background p-3">
           <DetailField label="Khotan run">
-            <CodeValue>{item.khotanRunId}</CodeValue>
+            {item.khotanRunId ? (
+              <CodeValue>{item.khotanRunId}</CodeValue>
+            ) : (
+              <span className="text-muted-foreground">None</span>
+            )}
           </DetailField>
           <DetailField label="Workflow run">
             {item.workflowRunId ? (
@@ -286,9 +314,31 @@ function WebhookEventDetails({ item }: { item: WebhookEventItem }) {
         </div>
       </div>
 
-      {item.runError ? (
+      <div className="grid gap-3 lg:grid-cols-3">
+        <DetailField label="Idempotency key">
+          {item.idempotencyKey ? (
+            <CodeValue>{item.idempotencyKey}</CodeValue>
+          ) : (
+            <span className="text-muted-foreground">None</span>
+          )}
+        </DetailField>
+        <DetailField label="Duplicate of">
+          {item.duplicateOfWebhookEventId ? (
+            <CodeValue>{item.duplicateOfWebhookEventId}</CodeValue>
+          ) : (
+            <span className="text-muted-foreground">None</span>
+          )}
+        </DetailField>
+        <DetailField label="Processing window">
+          <div>Started {formatLocalDateTime(item.processingStartedAt, "-")}</div>
+          <div>Completed {formatLocalDateTime(item.completedAt, "-")}</div>
+        </DetailField>
+      </div>
+
+      {item.error || item.runError ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-          {item.runError}
+          {item.error ? <div>{item.error}</div> : null}
+          {item.runError ? <div>{item.runError}</div> : null}
         </div>
       ) : null}
 
@@ -392,7 +442,7 @@ export function KhotanWebhookEventsTable({
               {loading ? (
                 <TableRow>
                   <TableCell
-                    colSpan={6}
+                    colSpan={7}
                     className="text-sm text-muted-foreground"
                   >
                     Loading webhook events...
@@ -415,19 +465,35 @@ export function KhotanWebhookEventsTable({
                           </div>
                         </TableCell>
                         <TableCell>
-                          {item.runStatus ? (
-                            <Badge variant={statusVariant[item.runStatus]}>
-                              {item.runStatus}
+                          <div className="space-y-1">
+                            <Badge variant={statusVariant[item.status]}>
+                              {item.status}
                             </Badge>
-                          ) : (
-                            <Badge variant="outline">unlinked</Badge>
-                          )}
-                          {item.runError ? (
+                            <div className="text-xs text-muted-foreground">
+                              attempts {item.attempts}
+                            </div>
+                            {item.runStatus ? (
+                              <Badge variant={statusVariant[item.runStatus]}>
+                                run {item.runStatus}
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline">unlinked</Badge>
+                            )}
+                            {item.idempotencyKey ? (
+                              <div
+                                className="max-w-56 truncate font-mono text-xs text-muted-foreground"
+                                title={item.idempotencyKey}
+                              >
+                                {item.idempotencyKey}
+                              </div>
+                            ) : null}
+                          </div>
+                          {item.error || item.runError ? (
                             <div
                               className="mt-1 max-w-56 truncate text-xs text-destructive"
-                              title={item.runError}
+                              title={item.error ?? item.runError ?? undefined}
                             >
-                              {item.runError}
+                              {item.error ?? item.runError}
                             </div>
                           ) : null}
                         </TableCell>
@@ -470,7 +536,7 @@ export function KhotanWebhookEventsTable({
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={6}
+                    colSpan={7}
                     className="text-sm text-muted-foreground"
                   >
                     No webhook events recorded yet.
