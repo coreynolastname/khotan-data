@@ -114,6 +114,109 @@ const scenarioTemplates = [
     ],
   },
   {
+    name: "next14-root-app-shared-db-package",
+    packageManager: "npm",
+    fixture: "next14-root-app",
+    prepare(projectDir) {
+      fs.writeFileSync(
+        path.join(projectDir, "khotan.config.ts"),
+        `export default { outputDir: "khotan" };\n`,
+      );
+
+      fs.mkdirSync(path.join(projectDir, "khotan"), { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, "khotan", "khotan.ts"),
+        [
+          `import { khotan, drizzleAdapter } from "khotan-data/factory";`,
+          `import { db } from "@khotan-e2e/pipeline-db";`,
+          ``,
+          `const khotanData = khotan({`,
+          `  adapter: drizzleAdapter(db),`,
+          `  authorize: false,`,
+          `  plugs: [],`,
+          `});`,
+          ``,
+          `export default khotanData;`,
+          ``,
+        ].join("\n"),
+      );
+
+      const packageSrc = path.join(
+        projectDir,
+        "packages",
+        "databases",
+        "pipeline",
+        "src",
+      );
+      fs.mkdirSync(packageSrc, { recursive: true });
+      fs.writeFileSync(
+        path.join(packageSrc, "index.ts"),
+        [
+          `import { drizzle } from "drizzle-orm/postgres-js";`,
+          `import postgres from "postgres";`,
+          ``,
+          `const connectionString =`,
+          `  process.env.DATABASE_URL ?? "postgres://user:password@localhost:5432/app";`,
+          `const client = postgres(connectionString, { prepare: false });`,
+          ``,
+          `export const db = drizzle(client);`,
+          ``,
+        ].join("\n"),
+      );
+
+      const tsconfigPath = path.join(projectDir, "tsconfig.json");
+      const tsconfig = readJson(tsconfigPath);
+      tsconfig.compilerOptions.paths["@khotan-e2e/pipeline-db"] = [
+        "./packages/databases/pipeline/src/index.ts",
+      ];
+      fs.writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`);
+    },
+    commands: [
+      ["init", "--yes"],
+      [
+        "generate",
+        "--shared-db",
+        "--schema-output",
+        "packages/databases/pipeline/src/khotan.ts",
+        "--schema-barrel",
+        "packages/databases/pipeline/src/index.ts",
+        "--drizzle-config",
+        "packages/databases/pipeline/drizzle.config.ts",
+        "--migrations-output",
+        "packages/databases/pipeline/migrations",
+        "--db-package",
+        "@khotan-e2e/pipeline-db",
+      ],
+    ],
+    expectedFiles: [
+      "khotan.config.ts",
+      "khotan/khotan.ts",
+      "app/api/khotan/[...all]/route.ts",
+      "packages/databases/pipeline/src/index.ts",
+      "packages/databases/pipeline/src/khotan.ts",
+      "packages/databases/pipeline/drizzle.config.ts",
+    ],
+    expectedAbsentFiles: ["drizzle.config.ts", "drizzle"],
+    expectedContent: [
+      {
+        file: "khotan/khotan.ts",
+        text: 'import { db } from "@khotan-e2e/pipeline-db";',
+      },
+      {
+        file: "packages/databases/pipeline/src/index.ts",
+        text: 'export * from "./khotan";',
+      },
+      {
+        file: "packages/databases/pipeline/drizzle.config.ts",
+        text: 'schema: "./src/index.ts"',
+      },
+      {
+        file: "packages/databases/pipeline/drizzle.config.ts",
+        text: 'out: "./migrations"',
+      },
+    ],
+  },
+  {
     name: "next15-src-app-single-schema-config",
     packageManager: "pnpm",
     fixture: "next15-src-app",
@@ -297,6 +400,13 @@ function assertFile(projectDir, relPath) {
   }
 }
 
+function assertFileAbsent(projectDir, relPath) {
+  const fullPath = path.join(projectDir, relPath);
+  if (fs.existsSync(fullPath)) {
+    throw new Error(`Expected ${relPath} not to exist`);
+  }
+}
+
 function assertIncludes(projectDir, relPath, text) {
   assertFile(projectDir, relPath);
   const content = fs.readFileSync(path.join(projectDir, relPath), "utf-8");
@@ -379,6 +489,7 @@ function installConsumer(scenario, projectDir, tarballPath) {
 function runScenario(scenario, tarballPath, tmpRoot) {
   console.log(`\n== ${scenarioId(scenario)} ==`);
   const projectDir = copyFixture(scenario, tmpRoot);
+  scenario.prepare?.(projectDir);
   installConsumer(scenario, projectDir, tarballPath);
 
   const bin = khotanBin(projectDir);
@@ -402,6 +513,9 @@ function runScenario(scenario, tarballPath, tmpRoot) {
 
   for (const relPath of scenario.expectedFiles) {
     assertFile(projectDir, relPath);
+  }
+  for (const relPath of scenario.expectedAbsentFiles ?? []) {
+    assertFileAbsent(projectDir, relPath);
   }
   for (const check of scenario.expectedContent) {
     assertIncludes(projectDir, check.file, check.text);

@@ -2693,6 +2693,135 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(result.output).toContain("Running init");
       expect(fs.existsSync(path.join(tmpDir, "khotan.config.ts"))).toBe(true);
     });
+
+    it("supports shared database package schema, config, barrel, and migrations paths", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      writePkgJson(tmpDir, { "khotan-data": "^0.0.1" });
+
+      const result = run(
+        [
+          "generate",
+          "--shared-db",
+          "--schema-output",
+          "packages/databases/pipeline/src/khotan.ts",
+          "--schema-barrel",
+          "packages/databases/pipeline/src/index.ts",
+          "--drizzle-config",
+          "packages/databases/pipeline/drizzle.config.ts",
+          "--migrations-output",
+          "packages/databases/pipeline/migrations",
+          "--db-package",
+          "@acme/pipeline-db",
+        ].join(" "),
+        tmpDir,
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("Shared database package mode enabled");
+      expect(result.output).toContain("Shared runtime validation");
+
+      const schemaPath = path.join(
+        tmpDir,
+        "packages",
+        "databases",
+        "pipeline",
+        "src",
+        "khotan.ts",
+      );
+      expect(fs.existsSync(schemaPath)).toBe(true);
+      expect(fs.readFileSync(schemaPath, "utf-8")).toContain("khotan_plugs");
+
+      const barrelPath = path.join(
+        tmpDir,
+        "packages",
+        "databases",
+        "pipeline",
+        "src",
+        "index.ts",
+      );
+      expect(fs.readFileSync(barrelPath, "utf-8")).toContain(
+        'export * from "./khotan";',
+      );
+
+      const drizzleConfig = fs.readFileSync(
+        path.join(
+          tmpDir,
+          "packages",
+          "databases",
+          "pipeline",
+          "drizzle.config.ts",
+        ),
+        "utf-8",
+      );
+      expect(drizzleConfig).toContain('schema: "./src/index.ts"');
+      expect(drizzleConfig).toContain('out: "./migrations"');
+      expect(fs.existsSync(path.join(tmpDir, "drizzle.config.ts"))).toBe(false);
+
+      const pkg = JSON.parse(
+        fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8"),
+      ) as { devDependencies?: Record<string, string> };
+      expect(pkg.devDependencies?.["drizzle-kit"]).toBeUndefined();
+    });
+
+    it("validates shared runtime imports when a db package is provided", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, "khotan"), { recursive: true });
+      writePkgJson(tmpDir, { "khotan-data": "^0.0.1" });
+      fs.writeFileSync(
+        path.join(tmpDir, "khotan.config.ts"),
+        `export default { outputDir: "khotan" };\n`,
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "khotan", "khotan.ts"),
+        [
+          `import { khotan, drizzleAdapter } from "khotan-data/factory";`,
+          `import { db } from "@acme/pipeline-db";`,
+          ``,
+          `const khotanData = khotan({`,
+          `  adapter: drizzleAdapter(db),`,
+          `  authorize: false,`,
+          `  plugs: [],`,
+          `});`,
+          ``,
+          `export default khotanData;`,
+          ``,
+        ].join("\n"),
+      );
+
+      run("init", tmpDir);
+      const result = run(
+        [
+          "generate",
+          "--shared-db",
+          "--schema-output",
+          "packages/databases/pipeline/src/khotan.ts",
+          "--schema-barrel",
+          "packages/databases/pipeline/src/index.ts",
+          "--db-package",
+          "@acme/pipeline-db",
+        ].join(" "),
+        tmpDir,
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("khotan/khotan.ts uses drizzleAdapter");
+      expect(result.output).toContain(
+        'khotan/khotan.ts imports db from "@acme/pipeline-db"',
+      );
+      expect(result.output).toContain(
+        "app/api/khotan/[...all]/route.ts uses toNextJsHandler",
+      );
+    });
+
+    it("requires an explicit schema output in shared database mode", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      writePkgJson(tmpDir, { "khotan-data": "^0.0.1" });
+
+      const result = run("generate --shared-db", tmpDir);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("--shared-db requires --schema-output");
+    });
   });
 
   describe("help", () => {

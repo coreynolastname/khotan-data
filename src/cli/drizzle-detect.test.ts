@@ -8,6 +8,7 @@ import {
   updateDrizzleConfigSchema,
   defaultDrizzleSchemaDir,
   scaffoldDrizzleConfig,
+  syncDrizzleConfig,
 } from "./drizzle-detect.js";
 
 describe("resolveDrizzleSchemaDir", () => {
@@ -260,5 +261,86 @@ describe("scaffoldDrizzleConfig", () => {
     expect(
       fs.readFileSync(path.join(tmpDir, "drizzle.config.ts"), "utf-8"),
     ).toBe("existing");
+  });
+});
+
+describe("syncDrizzleConfig", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "khotan-drizzle-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("creates a config with schema and out relative to the config file", () => {
+    const result = syncDrizzleConfig(tmpDir, {
+      configPath: "packages/databases/pipeline/drizzle.config.ts",
+      schemaPath: "packages/databases/pipeline/src/index.ts",
+      migrationsOutput: "packages/databases/pipeline/migrations",
+    });
+
+    expect(result.status).toBe("created");
+    expect(result.schemaValue).toBe("./src/index.ts");
+    expect(result.outValue).toBe("./migrations");
+
+    const content = fs.readFileSync(result.path, "utf-8");
+    expect(content).toContain('schema: "./src/index.ts"');
+    expect(content).toContain('out: "./migrations"');
+    expect(content).toContain('import { defineConfig } from "drizzle-kit"');
+  });
+
+  it("updates an existing config without rewriting unrelated fields", () => {
+    const configPath = path.join(
+      tmpDir,
+      "packages",
+      "databases",
+      "pipeline",
+      "drizzle.config.ts",
+    );
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      [
+        `export default {`,
+        `  dialect: "postgresql",`,
+        `  schema: "./src/schema.ts",`,
+        `  out: "./drizzle",`,
+        `  strict: true,`,
+        `};`,
+        ``,
+      ].join("\n"),
+    );
+
+    const result = syncDrizzleConfig(tmpDir, {
+      configPath: "packages/databases/pipeline/drizzle.config.ts",
+      schemaPath: "packages/databases/pipeline/src/index.ts",
+      migrationsOutput: "packages/databases/pipeline/migrations",
+    });
+
+    expect(result.status).toBe("updated");
+    expect(result.updatedFields).toEqual(["schema", "out"]);
+
+    const content = fs.readFileSync(configPath, "utf-8");
+    expect(content).toContain('schema: "./src/index.ts"');
+    expect(content).toContain('out: "./migrations"');
+    expect(content).toContain("strict: true");
+  });
+
+  it("returns unsupported for an existing config without a string schema", () => {
+    const configPath = path.join(tmpDir, "drizzle.config.ts");
+    fs.writeFileSync(configPath, `export default { schema: ["./src/db/*"] };`);
+
+    const result = syncDrizzleConfig(tmpDir, {
+      configPath: "drizzle.config.ts",
+      schemaPath: "src/db/index.ts",
+    });
+
+    expect(result.status).toBe("unsupported");
+    expect(fs.readFileSync(configPath, "utf-8")).toContain(
+      'schema: ["./src/db/*"]',
+    );
   });
 });
