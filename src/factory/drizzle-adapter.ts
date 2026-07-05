@@ -1100,6 +1100,9 @@ export function drizzleAdapter<
                 workflowRunId: khotanRuns.workflowRunId,
                 status: khotanRuns.status,
                 startedAt: khotanRuns.startedAt,
+                completedAt: khotanRuns.completedAt,
+                durationMs: khotanRuns.durationMs,
+                error: khotanRuns.error,
               })
               .from(khotanRuns)
               .where(inArray(khotanRuns.id, runIds))
@@ -1122,6 +1125,9 @@ export function drizzleAdapter<
             workflowRunId: run?.workflowRunId ?? null,
             runStatus: run?.status ?? null,
             runStartedAt: run?.startedAt ?? null,
+            runCompletedAt: run?.completedAt ?? null,
+            runDurationMs: run?.durationMs ?? null,
+            runError: run?.error ?? null,
           };
         }),
         hasMore,

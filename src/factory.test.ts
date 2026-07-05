@@ -738,6 +738,10 @@ function createMockAdapter(): KhotanAdapter {
               runStore.get(event.khotanRunId)?.workflowRunId ?? null,
             runStatus: runStore.get(event.khotanRunId)?.status ?? null,
             runStartedAt: runStore.get(event.khotanRunId)?.startedAt ?? null,
+            runCompletedAt:
+              runStore.get(event.khotanRunId)?.completedAt ?? null,
+            runDurationMs: runStore.get(event.khotanRunId)?.durationMs ?? null,
+            runError: runStore.get(event.khotanRunId)?.error ?? null,
           })),
           hasMore: rows.length > limit,
         };
@@ -1699,6 +1703,13 @@ describe("khotan factory", () => {
         source: "webhook",
         status: "running",
       });
+      await adapter.updateRun(runId2, {
+        status: "failed",
+        workflowRunId: "workflow-run-2",
+        completedAt: new Date("2026-01-02T00:00:01.234Z"),
+        durationMs: 1234,
+        error: "Handler failed",
+      });
 
       await adapter.insertWebhookEvent({
         wireId: "wire-1",
@@ -1718,20 +1729,29 @@ describe("khotan factory", () => {
       });
 
       const res = await instance.handler(
-        makeRequest("/api/khotan/webhook-events?limit=1"),
+        makeRequest("/api/khotan/webhook-events?limit=2"),
       );
       expect(res.status).toBe(200);
 
       const data = await res.json();
-      expect(data.items).toHaveLength(1);
+      expect(data.items).toHaveLength(2);
       expect(data.page).toMatchObject({
-        limit: 1,
+        limit: 2,
         offset: 0,
-        hasMore: true,
+        hasMore: false,
         prevOffset: 0,
-        nextOffset: 1,
+        nextOffset: 2,
       });
       expect(data.items[0]).toHaveProperty("eventType");
+      const failedItem = data.items.find(
+        (item: { eventType: string }) => item.eventType === "order.updated",
+      );
+      expect(failedItem).toMatchObject({
+        workflowRunId: "workflow-run-2",
+        runStatus: "failed",
+        runDurationMs: 1234,
+        runError: "Handler failed",
+      });
     });
 
     it("POST /api/khotan/flows/:id/runs executes a flow and updates run lifecycle", async () => {
@@ -3424,6 +3444,10 @@ describe("khotan factory", () => {
 
       const flowInstance = khotanOpen({
         adapter,
+        vercel: {
+          deploymentUrl: "app.example.com",
+          workflowRunBaseUrl: "https://vercel.com/acme/app/workflow-runs",
+        },
         plugs: [
           {
             name: "stripe",
@@ -3454,6 +3478,9 @@ describe("khotan factory", () => {
         id: "run-1",
         workflowRunId: "workflow-run-1",
         workflowStatus: "running",
+        vercelDeploymentUrl: "https://app.example.com",
+        vercelWorkflowRunUrl:
+          "https://vercel.com/acme/app/workflow-runs/workflow-run-1",
       });
     });
 

@@ -255,6 +255,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     onFlowRunComplete,
     onFlowRunFailed,
     onWebhookReceived,
+    vercel,
   } = config;
   const instanceId = deriveInstanceId(config);
 
@@ -295,6 +296,51 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         "wire metadata will not be encrypted at rest. Set KHOTAN_SECRET to a " +
         "high-entropy value.",
     );
+  }
+
+  function normalizeAbsoluteUrl(
+    value: string | null | undefined,
+  ): string | null {
+    const trimmed = value?.trim();
+    if (!trimmed) return null;
+    const withProtocol = /^https?:\/\//i.test(trimmed)
+      ? trimmed
+      : `https://${trimmed}`;
+    return withProtocol.replace(/\/+$/, "");
+  }
+
+  const vercelDeploymentUrl = normalizeAbsoluteUrl(
+    vercel?.deploymentUrl ??
+      process.env["VERCEL_PROJECT_PRODUCTION_URL"] ??
+      process.env["VERCEL_URL"],
+  );
+  const vercelWorkflowRunBaseUrl = normalizeAbsoluteUrl(
+    vercel?.workflowRunBaseUrl,
+  );
+
+  function getVercelWorkflowRunUrl(
+    workflowRunId: string | null,
+  ): string | null {
+    if (!workflowRunId || !vercelWorkflowRunBaseUrl) return null;
+    const encodedRunId = encodeURIComponent(workflowRunId);
+    if (vercelWorkflowRunBaseUrl.includes("{workflowRunId}")) {
+      return vercelWorkflowRunBaseUrl.replaceAll(
+        "{workflowRunId}",
+        encodedRunId,
+      );
+    }
+    return `${vercelWorkflowRunBaseUrl}/${encodedRunId}`;
+  }
+
+  function addRunOperationalLinks(
+    run: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const workflowRunId = getRunWorkflowId(run);
+    return {
+      ...run,
+      vercelDeploymentUrl,
+      vercelWorkflowRunUrl: getVercelWorkflowRunUrl(workflowRunId),
+    };
   }
 
   const plugNames = new Set<string>();
@@ -2144,7 +2190,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       typeof run["workflowRunId"] === "string" ? run["workflowRunId"] : null;
 
     if (!workflowRunId) {
-      return { ...run, workflowStatus: null };
+      return addRunOperationalLinks({ ...run, workflowStatus: null });
     }
 
     try {
@@ -2157,13 +2203,13 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         run,
         workflowStatus,
       );
-      return { ...reconciledRun, workflowStatus };
+      return addRunOperationalLinks({ ...reconciledRun, workflowStatus });
     } catch (error) {
-      return {
+      return addRunOperationalLinks({
         ...run,
         workflowStatus: null,
         workflowError: getErrorMessage(error),
-      };
+      });
     }
   }
 
@@ -3115,7 +3161,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         const page = await adapter.listRunsPage({ limit, offset });
         const items = await reconcileRunRowsWithWorkflowStatus(page.items);
         return Response.json({
-          items,
+          items: items.map(addRunOperationalLinks),
           page: {
             limit,
             offset,
@@ -3256,7 +3302,17 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         );
         const page = await adapter.listWebhookEventsPage({ limit, offset });
         return Response.json({
-          items: page.items,
+          items: page.items.map((item) => {
+            const workflowRunId =
+              typeof item["workflowRunId"] === "string"
+                ? item["workflowRunId"]
+                : null;
+            return {
+              ...item,
+              vercelDeploymentUrl,
+              vercelWorkflowRunUrl: getVercelWorkflowRunUrl(workflowRunId),
+            };
+          }),
           page: {
             limit,
             offset,

@@ -1,13 +1,18 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import type { ReactNode } from "react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import { khotanFetch, ApiErrorState } from "./api-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { formatLocalDateTime, formatLocalTime } from "./date-time";
+import {
+  formatDurationMs,
+  formatLocalDateTime,
+  formatLocalTime,
+} from "./date-time";
 import {
   Table,
   TableBody,
@@ -35,14 +40,18 @@ interface RunLogItem {
   plugName: string | null;
   startedAt: string;
   completedAt: string | null;
+  durationMs: number | null;
   extracted: number;
   transformed: number;
   created: number;
   updated: number;
   deleted: number;
   failed: number;
+  skipped?: number;
   error: string | null;
   metadata?: Record<string, unknown> | null;
+  vercelDeploymentUrl?: string | null;
+  vercelWorkflowRunUrl?: string | null;
 }
 
 interface PageResponse<T> {
@@ -74,6 +83,52 @@ const statusLabel = {
   cancelled: "cancelled",
 } as const;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseTime(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : time;
+}
+
+function isLiveRun(item: RunLogItem): boolean {
+  return item.status === "pending" || item.status === "running";
+}
+
+function getRunDurationMs(item: RunLogItem): number | null {
+  if (typeof item.durationMs === "number" && Number.isFinite(item.durationMs)) {
+    return item.durationMs;
+  }
+  const startedAt = parseTime(item.startedAt);
+  if (!startedAt) return null;
+  const completedAt =
+    parseTime(item.completedAt) ?? (isLiveRun(item) ? Date.now() : null);
+  return completedAt && completedAt >= startedAt
+    ? completedAt - startedAt
+    : null;
+}
+
+function formatRunDuration(item: RunLogItem): { label: string; hint: string } {
+  const durationMs = getRunDurationMs(item);
+  if (durationMs === null) {
+    return { label: "-", hint: "not recorded" };
+  }
+  return {
+    label: formatDurationMs(durationMs),
+    hint: item.durationMs === null && isLiveRun(item) ? "elapsed" : "total",
+  };
+}
+
 function formatSource(item: RunLogItem): string {
   if (!item.sourceName) return "Unknown";
   if (item.sourceType !== "webhook" || !item.sourceKind) return item.sourceName;
@@ -82,14 +137,29 @@ function formatSource(item: RunLogItem): string {
 
 function formatCounts(item: RunLogItem): string {
   const parts = [
-    item.extracted > 0 ? `extracted ${String(item.extracted)}` : null,
-    item.transformed > 0 ? `transformed ${String(item.transformed)}` : null,
-    item.created > 0 ? `created ${String(item.created)}` : null,
-    item.updated > 0 ? `updated ${String(item.updated)}` : null,
-    item.deleted > 0 ? `deleted ${String(item.deleted)}` : null,
-    item.failed > 0 ? `failed ${String(item.failed)}` : null,
+    item.extracted > 0 ? `${String(item.extracted)} extracted` : null,
+    item.transformed > 0 ? `${String(item.transformed)} transformed` : null,
+    item.created > 0 ? `${String(item.created)} created` : null,
+    item.updated > 0 ? `${String(item.updated)} updated` : null,
+    item.deleted > 0 ? `${String(item.deleted)} deleted` : null,
+    item.failed > 0 ? `${String(item.failed)} failed` : null,
+    (item.skipped ?? 0) > 0 ? `${String(item.skipped)} skipped` : null,
   ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" - ") : "-";
+  return parts.length > 0 ? parts.join(" / ") : "No counters";
+}
+
+function getAction(item: RunLogItem): {
+  label: string;
+  variant: "default" | "secondary" | "destructive" | "outline";
+} {
+  if (item.error || item.status === "failed" || item.failed > 0) {
+    return { label: "Review", variant: "destructive" };
+  }
+  if (item.status === "partial")
+    return { label: "Review", variant: "secondary" };
+  if (isLiveRun(item)) return { label: "Watch", variant: "secondary" };
+  if (item.status === "cancelled") return { label: "None", variant: "outline" };
+  return { label: "None", variant: "outline" };
 }
 
 function formatStreamLine(line: string): string {
@@ -118,6 +188,77 @@ function formatStreamLine(line: string): string {
   } catch {
     return line;
   }
+}
+
+function DetailField({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-medium uppercase text-muted-foreground">
+        {label}
+      </div>
+      <div className="break-words text-sm">{children}</div>
+    </div>
+  );
+}
+
+function CodeValue({ children }: { children: ReactNode }) {
+  return <code className="text-xs">{children}</code>;
+}
+
+function ExternalLinkAnchor({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+    >
+      {children}
+      <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+    </a>
+  );
+}
+
+function JsonBlock({
+  label,
+  value,
+  emptyLabel,
+}: {
+  label: string;
+  value: unknown;
+  emptyLabel: string;
+}) {
+  const hasValue =
+    value !== null &&
+    value !== undefined &&
+    (!isRecord(value) || Object.keys(value).length > 0);
+
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="mb-2 text-xs font-medium uppercase text-muted-foreground">
+        {label}
+      </div>
+      {hasValue ? (
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs">
+          {JSON.stringify(value, null, 2)}
+        </pre>
+      ) : (
+        <p className="text-sm text-muted-foreground">{emptyLabel}</p>
+      )}
+    </div>
+  );
 }
 
 function RunDetails({
@@ -176,8 +317,9 @@ function RunDetails({
   }, [fetchDetail, streamingEnabled]);
 
   useEffect(() => {
-    const isLiveRun = run.status === "pending" || run.status === "running";
-    if (!streamingEnabled && isLiveRun) return;
+    const liveRun = isLiveRun(run);
+    if (!run.workflowRunId && liveRun) return;
+    if (!streamingEnabled && liveRun) return;
 
     const controller = new AbortController();
     let buffer = "";
@@ -227,7 +369,7 @@ function RunDetails({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [onStreamInbound, run.id, run.status, streamingEnabled]);
+  }, [onStreamInbound, run.id, run.status, run.workflowRunId, streamingEnabled]);
 
   async function refreshDetail() {
     setError(null);
@@ -259,29 +401,32 @@ function RunDetails({
     }
   }
 
-  const workflowStatus =
-    typeof detail?.["workflowStatus"] === "string"
-      ? detail["workflowStatus"]
-      : null;
+  const workflowStatus = readString(detail?.["workflowStatus"]);
+  const workflowError = readString(detail?.["workflowError"]);
+  const vercelWorkflowRunUrl =
+    readString(detail?.["vercelWorkflowRunUrl"]) ?? run.vercelWorkflowRunUrl;
+  const vercelDeploymentUrl =
+    readString(detail?.["vercelDeploymentUrl"]) ?? run.vercelDeploymentUrl;
+  const metadata = isRecord(detail?.["metadata"])
+    ? detail?.["metadata"]
+    : run.metadata;
+  const durationMs =
+    readNumber(detail?.["durationMs"]) ?? getRunDurationMs(run);
+  const counters = [
+    ["Extracted", run.extracted],
+    ["Transformed", run.transformed],
+    ["Created", run.created],
+    ["Updated", run.updated],
+    ["Deleted", run.deleted],
+    ["Failed", run.failed],
+    ["Skipped", run.skipped ?? 0],
+  ] as const;
 
   return (
     <div className="space-y-3 rounded-md border bg-muted/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="space-y-1 text-sm">
-          <div>
-            <span className="font-medium">Khotan run:</span>{" "}
-            <code className="text-xs">{run.id}</code>
-          </div>
-          <div>
-            <span className="font-medium">Workflow status:</span>{" "}
-            {workflowStatus ?? "unknown"}
-          </div>
-          {run.workflowRunId ? (
-            <div>
-              <span className="font-medium">Workflow run:</span>{" "}
-              <code className="text-xs">{run.workflowRunId}</code>
-            </div>
-          ) : null}
+        <div>
+          <div className="text-sm font-medium">{formatSource(run)}</div>
           <div className="text-xs text-muted-foreground">
             Last updated:{" "}
             {lastUpdatedAt
@@ -289,7 +434,20 @@ function RunDetails({
               : "Not loaded yet"}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {vercelDeploymentUrl ? (
+            <a
+              href={vercelDeploymentUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground"
+            >
+              <span className="inline-flex items-center gap-1">
+                Deployment
+                <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+              </span>
+            </a>
+          ) : null}
           <Button
             variant="outline"
             size="sm"
@@ -325,7 +483,85 @@ function RunDetails({
         </div>
       ) : null}
 
-      <div className="rounded-md bg-background p-3">
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="space-y-3 rounded-md border bg-background p-3">
+          <DetailField label="Khotan run">
+            <CodeValue>{run.id}</CodeValue>
+          </DetailField>
+          <DetailField label="Workflow run">
+            {run.workflowRunId ? (
+              <div className="space-y-1">
+                <CodeValue>{run.workflowRunId}</CodeValue>
+                {vercelWorkflowRunUrl ? (
+                  <div>
+                    <ExternalLinkAnchor href={vercelWorkflowRunUrl}>
+                      Open in Vercel
+                    </ExternalLinkAnchor>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <span className="text-muted-foreground">None</span>
+            )}
+          </DetailField>
+          <DetailField label="Workflow status">
+            {workflowStatus ?? "unknown"}
+          </DetailField>
+        </div>
+
+        <div className="space-y-3 rounded-md border bg-background p-3">
+          <DetailField label="Source">
+            <div>{formatSource(run)}</div>
+            <div className="text-xs text-muted-foreground">
+              {run.sourceType} / {run.source} / {run.variant}
+            </div>
+          </DetailField>
+          <DetailField label="Plug">{run.plugName ?? "-"}</DetailField>
+          <DetailField label="Handler kind">
+            {run.sourceKind ?? run.sourceType}
+          </DetailField>
+        </div>
+
+        <div className="space-y-3 rounded-md border bg-background p-3">
+          <DetailField label="Started">
+            {formatLocalDateTime(run.startedAt)}
+          </DetailField>
+          <DetailField label="Completed">
+            {formatLocalDateTime(run.completedAt, "-")}
+          </DetailField>
+          <DetailField label="Duration">
+            {formatDurationMs(durationMs)}
+          </DetailField>
+        </div>
+      </div>
+
+      <div className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-2 lg:grid-cols-7">
+        {counters.map(([label, value]) => (
+          <div key={label} className="space-y-1">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              {label}
+            </div>
+            <div className="text-lg font-semibold tabular-nums">
+              {String(value)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {run.error || workflowError ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          {run.error ? <div>{run.error}</div> : null}
+          {workflowError ? <div>{workflowError}</div> : null}
+        </div>
+      ) : null}
+
+      <JsonBlock
+        label="Execution metadata"
+        value={metadata}
+        emptyLabel="No metadata recorded."
+      />
+
+      <div className="rounded-md border bg-background p-3">
         <div className="mb-2 text-xs font-medium uppercase text-muted-foreground">
           Run updates
         </div>
@@ -414,7 +650,7 @@ export function KhotanRunsTable({ pageSize = 10 }: { pageSize?: number } = {}) {
               : "Not loaded yet"}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className="relative flex h-2.5 w-2.5">
               {streamingEnabled && streamPulse ? (
@@ -463,11 +699,9 @@ export function KhotanRunsTable({ pageSize = 10 }: { pageSize?: number } = {}) {
                 <TableHead>Started</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Source</TableHead>
-                <TableHead>Plug</TableHead>
-                <TableHead>Variant</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Counts</TableHead>
-                <TableHead>Workflow</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Activity</TableHead>
+                <TableHead>Action</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -475,87 +709,97 @@ export function KhotanRunsTable({ pageSize = 10 }: { pageSize?: number } = {}) {
               {loading ? (
                 <TableRow>
                   <TableCell
-                    colSpan={9}
+                    colSpan={7}
                     className="text-sm text-muted-foreground"
                   >
                     Loading runs...
                   </TableCell>
                 </TableRow>
               ) : data?.items.length ? (
-                data.items.map((item) => (
-                  <Fragment key={item.id}>
-                    <TableRow>
-                      <TableCell className="text-sm text-muted-foreground">
-                        <div>{formatLocalDateTime(item.startedAt)}</div>
-                        <div className="text-xs">
-                          {item.completedAt
-                            ? `completed ${formatLocalDateTime(item.completedAt)}`
-                            : "in progress"}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={statusVariant[item.status]}>
-                          {statusLabel[item.status]}
-                        </Badge>
-                        {item.error ? (
-                          <div
-                            className="mt-1 max-w-56 truncate text-xs text-destructive"
-                            title={item.error}
-                          >
-                            {item.error}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell className="font-medium">
-                        {formatSource(item)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {item.plugName ?? "-"}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {item.variant}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {item.source}
-                      </TableCell>
-                      <TableCell className="max-w-64 text-xs text-muted-foreground">
-                        {formatCounts(item)}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
-                        {item.workflowRunId ?? "-"}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setExpandedRunId((current) =>
-                              current === item.id ? null : item.id,
-                            )
-                          }
-                        >
-                          {expandedRunId === item.id ? "Hide" : "Details"}
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                    {expandedRunId === item.id ? (
+                data.items.map((item) => {
+                  const duration = formatRunDuration(item);
+                  const action = getAction(item);
+                  return (
+                    <Fragment key={item.id}>
                       <TableRow>
-                        <TableCell colSpan={9}>
-                          <RunDetails
-                            run={item}
-                            streamingEnabled={streamingEnabled}
-                            onChanged={() => setRefreshKey((v) => v + 1)}
-                            onStreamInbound={pulseLiveIndicator}
-                          />
+                        <TableCell className="min-w-44 text-sm text-muted-foreground">
+                          <div>{formatLocalDateTime(item.startedAt)}</div>
+                          <div className="text-xs">
+                            {item.completedAt
+                              ? `completed ${formatLocalDateTime(item.completedAt)}`
+                              : "in progress"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={statusVariant[item.status]}>
+                            {statusLabel[item.status]}
+                          </Badge>
+                          {item.error ? (
+                            <div
+                              className="mt-1 max-w-56 truncate text-xs text-destructive"
+                              title={item.error}
+                            >
+                              {item.error}
+                            </div>
+                          ) : null}
+                        </TableCell>
+                        <TableCell className="min-w-44">
+                          <div className="font-medium">
+                            {formatSource(item)}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {item.plugName ?? "-"} / {item.source} /{" "}
+                            {item.variant}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          <div className="font-medium tabular-nums">
+                            {duration.label}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {duration.hint}
+                          </div>
+                        </TableCell>
+                        <TableCell className="max-w-72 text-xs text-muted-foreground">
+                          {formatCounts(item)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={action.variant}>{action.label}</Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-expanded={expandedRunId === item.id}
+                            onClick={() =>
+                              setExpandedRunId((current) =>
+                                current === item.id ? null : item.id,
+                              )
+                            }
+                          >
+                            {expandedRunId === item.id ? "Hide" : "Details"}
+                          </Button>
                         </TableCell>
                       </TableRow>
-                    ) : null}
-                  </Fragment>
-                ))
+                      {expandedRunId === item.id ? (
+                        <TableRow>
+                          <TableCell colSpan={7}>
+                            <RunDetails
+                              run={item}
+                              streamingEnabled={streamingEnabled}
+                              onChanged={() => setRefreshKey((v) => v + 1)}
+                              onStreamInbound={pulseLiveIndicator}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </Fragment>
+                  );
+                })
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={9}
+                    colSpan={7}
                     className="text-sm text-muted-foreground"
                   >
                     No runs recorded yet.

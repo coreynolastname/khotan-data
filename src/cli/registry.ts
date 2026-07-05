@@ -249,7 +249,7 @@ const COMPONENTS: Record<string, ComponentEntry> = {
     requiresShadcn: true,
     dependencies: {
       npmPackages: ["lucide-react"],
-      shadcnComponents: ["card", "table", "badge", "button"],
+      shadcnComponents: ["card", "table", "badge", "button", "switch"],
     },
     files: [
       {

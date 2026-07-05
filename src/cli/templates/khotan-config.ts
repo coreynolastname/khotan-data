@@ -31,6 +31,13 @@ const khotanData = khotan({
   // exempt automatically.
   // authorize: authorizeKhotanRequest,
 
+  // Optional operational links shown in generated logs details. deploymentUrl
+  // falls back to VERCEL_PROJECT_PRODUCTION_URL or VERCEL_URL when omitted.
+  // vercel: {
+  //   deploymentUrl: process.env.VERCEL_PROJECT_PRODUCTION_URL,
+  //   workflowRunBaseUrl: process.env.VERCEL_WORKFLOW_RUN_BASE_URL,
+  // },
+
   // Resources define logical entity types for cross-referencing across plugs.
   // The mapping block declares the shared identity contract for that resource.
   resources: [

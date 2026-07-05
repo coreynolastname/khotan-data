@@ -79,3 +79,32 @@ export function formatLocalTime(
     emptyLabel,
   );
 }
+
+export function formatDurationMs(
+  value: number | null | undefined,
+  emptyLabel = "-",
+): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return emptyLabel;
+  }
+
+  if (value < 1000) {
+    return `${String(Math.round(value))} ms`;
+  }
+
+  const totalSeconds = Math.round(value / 1000);
+  if (totalSeconds < 60) {
+    const seconds = value / 1000;
+    return `${seconds < 10 ? seconds.toFixed(1) : String(totalSeconds)}s`;
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return `${String(totalMinutes)}m ${String(seconds).padStart(2, "0")}s`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${String(hours)}h ${String(minutes).padStart(2, "0")}m`;
+}
