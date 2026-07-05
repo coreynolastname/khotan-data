@@ -25,10 +25,31 @@ export type WorkflowGetWritableFn = <T = unknown>(options?: {
   namespace?: string;
 }) => WritableStream<T>;
 
+export const WORKFLOW_INVALID_FUNCTION_CODE = "start-invalid-workflow-function";
+export const KHOTAN_INVALID_WORKFLOW_FUNCTION_CODE =
+  "khotan_invalid_workflow_function";
+
 export interface WorkflowRuntimeConfig {
   start?: WorkflowStartFn | null;
   getRun?: WorkflowGetRunFn | null;
   getWritable?: WorkflowGetWritableFn | null;
+}
+
+export interface WorkflowStartGuidanceContext {
+  kind: "flow" | "webhook";
+  name: string;
+  plugName?: string | null;
+  variant?: string | null;
+  routePath?: string;
+}
+
+export class KhotanWorkflowStartError extends Error {
+  readonly code = KHOTAN_INVALID_WORKFLOW_FUNCTION_CODE;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "KhotanWorkflowStartError";
+  }
 }
 
 let _workflowStart: WorkflowStartFn | null = null;
@@ -97,6 +118,24 @@ export async function importWorkflowGetRun(): Promise<WorkflowGetRunFn> {
   }
 }
 
+export async function startWorkflowWithGuidance(
+  startWorkflow: WorkflowStartFn,
+  workflowFn: Parameters<WorkflowStartFn>[0],
+  args: Parameters<WorkflowStartFn>[1],
+  context: WorkflowStartGuidanceContext,
+): Promise<unknown> {
+  try {
+    return await startWorkflow(workflowFn, args);
+  } catch (error) {
+    if (isInvalidWorkflowFunctionError(error)) {
+      throw new KhotanWorkflowStartError(
+        buildInvalidWorkflowFunctionMessage(context),
+      );
+    }
+    throw error;
+  }
+}
+
 async function importWorkflowGetWritable(): Promise<WorkflowGetWritableFn> {
   if (_workflowGetWritable) return _workflowGetWritable;
   try {
@@ -160,6 +199,12 @@ export function getWorkflowReturnValue(
     : null;
 }
 
+export function getKhotanErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as Record<string, unknown>)["code"];
+  return typeof code === "string" && code.startsWith("khotan_") ? code : null;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (
     error &&
@@ -185,4 +230,90 @@ export function isWorkflowCancelledError(error: unknown): boolean {
     status === "cancelled" ||
     message.toLowerCase().includes("cancelled")
   );
+}
+
+export function isInvalidWorkflowFunctionError(error: unknown): boolean {
+  return hasInvalidWorkflowFunctionCode(error, 0);
+}
+
+function hasInvalidWorkflowFunctionCode(
+  value: unknown,
+  depth: number,
+): boolean {
+  if (!value || typeof value !== "object" || depth > 5) return false;
+  const record = value as Record<string, unknown>;
+  const code = getStringProperty(record, "code");
+  const message = getStringProperty(record, "message");
+  const name = getStringProperty(record, "name");
+  if (
+    code === WORKFLOW_INVALID_FUNCTION_CODE ||
+    name === WORKFLOW_INVALID_FUNCTION_CODE ||
+    message?.includes(WORKFLOW_INVALID_FUNCTION_CODE)
+  ) {
+    return true;
+  }
+  return hasInvalidWorkflowFunctionCode(record["cause"], depth + 1);
+}
+
+function getStringProperty(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function buildInvalidWorkflowFunctionMessage(
+  context: WorkflowStartGuidanceContext,
+): string {
+  const target =
+    context.kind === "flow"
+      ? `flow "${context.name}"${context.plugName ? ` on plug "${context.plugName}"` : ""}`
+      : `${context.kind} workflow "${context.name}"${context.plugName ? ` on plug "${context.plugName}"` : ""}`;
+
+  const startHint =
+    context.kind === "flow"
+      ? `run your app (for example, npm run dev) and use \`${buildFlowTriggerCommand(context)}\`${context.routePath ? ` or POST ${context.routePath}` : ""}.`
+      : `run your app (for example, npm run dev) and send the event through ${context.routePath ?? "the generated Khotan route"}.`;
+  const scriptCause =
+    context.kind === "flow"
+      ? "This usually means `khotanData.flow(...).start(...)` was called from a raw Node/Bun script that imported source workflow files, so Workflow compiler metadata is missing."
+      : "This usually means the workflow was started from a raw Node/Bun script that imported source workflow files, so Workflow compiler metadata is missing.";
+  const compiledEntry =
+    context.kind === "flow"
+      ? "You can also call `khotanData.flow(...).start(...)` from compiled Next server code such as a route handler, server action, or cron path."
+      : "Webhook processing should enter through the generated Khotan webhook route in the compiled app.";
+
+  return [
+    `Khotan could not start the Workflow-backed ${target} because Vercel Workflow rejected the function (${WORKFLOW_INVALID_FUNCTION_CODE}).`,
+    scriptCause,
+    `Start it from the compiled Workflow/Next runtime instead: ${startHint}`,
+    compiledEntry,
+    'Ensure `next.config.*` wraps the export with `withWorkflow()` from "workflow/next" and the generated `/api/khotan/[...all]` route is present.',
+  ].join(" ");
+}
+
+function buildFlowTriggerCommand(
+  context: WorkflowStartGuidanceContext,
+): string {
+  const parts = [
+    "npx",
+    "khotan-data",
+    "flows",
+    "trigger",
+    formatShellArg(context.name),
+  ];
+
+  if (context.variant && context.variant !== "default") {
+    parts.push(formatShellArg(context.variant));
+  }
+  if (context.plugName) {
+    parts.push("--plug", formatShellArg(context.plugName));
+  }
+
+  return parts.join(" ");
+}
+
+function formatShellArg(value: string): string {
+  return /^[A-Za-z0-9._:@/-]+$/.test(value) ? value : JSON.stringify(value);
 }

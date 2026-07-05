@@ -128,6 +128,10 @@ await khotanData.flow("products-inflow", { plugName: "shopify" }).start({
 });
 ```
 
+Use this form from compiled app/server code (route handlers, server actions,
+cron paths). Workflow-backed flows need Workflow compiler metadata; do not import
+your khotan config into a raw Node/Bun script and call `.start()` there.
+
 `plugName` only disambiguates when the same flow name is registered under
 multiple plugs. `flow(name).start(options)` is the single entry point for manual
 and scheduled runs alike.
@@ -160,7 +164,11 @@ Gotcha: `KHOTAN_SECRET` is an encryption key, **not** an HTTP credential —
 sending `Authorization: Bearer <KHOTAN_SECRET>` returns `401` with
 `code: authorize_rejected`. Authenticate with a credential your `authorize` hook
 accepts (a session cookie, or your own token you validate inside `authorize`).
-Prefer server-side `khotanData.flow(name).start()` whenever you can.
+For script/QA helpers outside the app runtime, run the Next app (`npm run dev`)
+and use `npx khotan-data flows trigger <flowName>` or POST the route above.
+Do not call `.start()` from a raw Node/Bun script that imports source workflow
+files; it can fail with `start-invalid-workflow-function` because the Workflow
+compiler metadata is missing.
 
 ## Variants (run modes)
 

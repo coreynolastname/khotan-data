@@ -208,6 +208,12 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(
         fs.existsSync(path.join(tmpDir, "src", "khotan", "khotan.ts")),
       ).toBe(true);
+      const khotanContent = fs.readFileSync(
+        path.join(tmpDir, "src", "khotan", "khotan.ts"),
+        "utf-8",
+      );
+      expect(khotanContent).toContain("raw Node/Bun script");
+      expect(khotanContent).toContain("npx khotan-data flows trigger");
       expect(
         fs.existsSync(
           path.join(

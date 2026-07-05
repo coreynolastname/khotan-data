@@ -219,8 +219,10 @@ Vercel Workflow also requires AI Gateway OIDC — run `vercel link` and
 
 Flow triggering, HTTP trigger routes, and the Vercel cron dispatcher live in the
 `khotan-flow` skill. The short version: start flows with
-`khotanData.flow(name).start()` server-side, or `npx khotan-data flows trigger <name>`
-in dev — never call the workflow function directly.
+`khotanData.flow(name).start()` from compiled Next server code, or
+`npx khotan-data flows trigger <name>` in dev. Do not call `.start()` from a raw
+Node/Bun script that imports source workflow files; Workflow-backed flows need
+compiler metadata. Never call the workflow function directly.
 
 ## Verify Setup
 
@@ -243,4 +245,5 @@ flows on Vercel (the single cron-dispatcher pattern) lives in `khotan-flow`.
 - **Migration fails**: Ensure `DATABASE_URL` is set and Postgres is reachable
 - **Init won't overwrite**: By design — delete the file manually if you need to re-scaffold
 - **Flow/workflow runs hang or never start**: Check your `middleware.ts`/`proxy.ts` matcher excludes `/.well-known/workflow/*` (see "Workflow Runtime & Middleware/Proxy")
+- **`start-invalid-workflow-function` from `.start()`**: You are probably starting a Workflow-backed flow from a raw Node/Bun script. Run the Next app and trigger through `npx khotan-data flows trigger <flowName>` or the generated `/api/khotan/flows/{flowId}/runs` route instead.
 - **Step "is not a function" / fails to resolve at runtime**: Declare `"use step"` functions at module top level and pass `ctx` as an argument — never nest them inside the `"use workflow"` function (closures over workflow scope cannot be hoisted)

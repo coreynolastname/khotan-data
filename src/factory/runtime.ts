@@ -31,9 +31,11 @@ import {
 import {
   importWorkflowStart,
   importWorkflowGetRun,
+  startWorkflowWithGuidance,
   getWorkflowRunId,
   getWorkflowReturnValue,
   getErrorMessage,
+  getKhotanErrorCode,
   isWorkflowCancelledError,
 } from "./workflow.js";
 import type {
@@ -1698,17 +1700,28 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
       if (flowReg.workflow) {
         const startWorkflow = await importWorkflowStart();
-        const result = await startWorkflow(flowReg.workflow, [
+        const result = await startWorkflowWithGuidance(
+          startWorkflow,
+          flowReg.workflow,
+          [
+            {
+              flow: flowContext,
+              variant,
+              body: runBody,
+              vars,
+              plugVarsByName,
+              khotanRunId: runId,
+              khotanInstanceId: instanceId,
+            },
+          ],
           {
-            flow: flowContext,
+            kind: "flow",
+            name: flowReg.name,
+            plugName,
             variant,
-            body: runBody,
-            vars,
-            plugVarsByName,
-            khotanRunId: runId,
-            khotanInstanceId: instanceId,
+            routePath: `/api/khotan/flows/${flowId}/runs`,
           },
-        ]);
+        );
         const workflowRunId = getWorkflowRunId(result);
 
         if (workflowRunId) {
@@ -1762,8 +1775,15 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       });
     } catch (error) {
       const message = await completeRunFailed(error);
+      const code = getKhotanErrorCode(error);
       return Response.json(
-        { id: runId, flowId, status: "failed", error: message },
+        {
+          id: runId,
+          flowId,
+          status: "failed",
+          error: message,
+          ...(code ? { code } : {}),
+        },
         { status: 500 },
       );
     }
@@ -2057,7 +2077,16 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             payload && typeof payload === "object" && "error" in payload
               ? String(payload.error)
               : `Failed to start flow "${flowNameOrId}"`;
-          throw new Error(message);
+          const error = new Error(message);
+          if (
+            payload &&
+            typeof payload === "object" &&
+            "code" in payload &&
+            typeof payload.code === "string"
+          ) {
+            Object.assign(error, { code: payload.code });
+          }
+          throw error;
         }
 
         return payload as Record<string, unknown>;
@@ -2625,6 +2654,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       wireId: string | null;
       startWorkflow: Awaited<ReturnType<typeof importWorkflowStart>>;
       allPlugs: Record<string, unknown>[];
+      plugName: string;
     },
   ): Promise<void> {
     if (
@@ -2698,7 +2728,17 @@ export function khotan(config: KhotanConfig): KhotanInstance {
               khotanInstanceId: instanceId,
             };
 
-      const result = await ctx.startWorkflow(handler.workflow, [workflowCtx]);
+      const result = await startWorkflowWithGuidance(
+        ctx.startWorkflow,
+        handler.workflow,
+        [workflowCtx],
+        {
+          kind: "webhook",
+          name: handler.name,
+          plugName: ctx.plugName,
+          routePath: `/api/khotan/webhook/${ctx.plugName}`,
+        },
+      );
       const workflowRunId = getWorkflowRunId(result);
       if (workflowRunId) {
         await adapter.updateRun(khotanRunId, {
@@ -3343,6 +3383,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
                 wireId,
                 startWorkflow,
                 allPlugs: allPlugsRows,
+                plugName,
               });
             }
           } catch (err) {
