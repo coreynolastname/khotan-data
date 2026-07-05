@@ -262,6 +262,7 @@ export const khotanRuns = pgTable(
     updated: integer("updated").default(0).notNull(),
     deleted: integer("deleted").default(0).notNull(),
     failed: integer("failed").default(0).notNull(),
+    skipped: integer("skipped").default(0).notNull(),
     error: text("error"),
     metadata: jsonb("metadata"),
   },
