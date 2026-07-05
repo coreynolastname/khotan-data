@@ -12,6 +12,11 @@ import type { AddressInfo } from "node:net";
 import { ensureWorkflowNextConfig } from "./next-config.js";
 
 const CLI_PATH = path.resolve(__dirname, "../../dist/cli.js");
+const PKG_VERSION = (
+  JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf-8"),
+  ) as { version: string }
+).version;
 
 function run(
   args: string,
@@ -80,6 +85,18 @@ function writePkgJson(
 
 function parseCliJson(output: string): Record<string, unknown> {
   return JSON.parse(output) as Record<string, unknown>;
+}
+
+function setGeneratedVersion(filePath: string, version: string): void {
+  const content = fs.readFileSync(filePath, "utf-8");
+  fs.writeFileSync(
+    filePath,
+    content.replace(
+      /^\/\/ khotan-template-version: .+$/m,
+      `// khotan-template-version: ${version}`,
+    ),
+    "utf-8",
+  );
 }
 
 function installFakeNpm(cwd: string): () => void {
@@ -221,6 +238,32 @@ describe("CLI", { timeout: 30_000 }, () => {
           ),
         ),
       ).toBe(true);
+
+      const khotanContent = fs.readFileSync(
+        path.join(tmpDir, "src", "khotan", "khotan.ts"),
+        "utf-8",
+      );
+      expect(khotanContent).toContain("// khotan-template: khotan-config.ts");
+      expect(khotanContent).toContain(
+        `// khotan-template-version: ${PKG_VERSION}`,
+      );
+
+      const routeContent = fs.readFileSync(
+        path.join(
+          tmpDir,
+          "src",
+          "app",
+          "api",
+          "khotan",
+          "[...all]",
+          "route.ts",
+        ),
+        "utf-8",
+      );
+      expect(routeContent).toContain("// khotan-template: khotan-route.ts");
+      expect(routeContent).toContain(
+        `// khotan-template-version: ${PKG_VERSION}`,
+      );
     });
 
     it("creates .env.template with khotan environment variables", () => {
@@ -484,6 +527,11 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(fs.existsSync(plugPath)).toBe(true);
 
       const content = fs.readFileSync(plugPath, "utf-8");
+      expect(content).toContain("// khotan-template: plug.ts");
+      expect(content).toContain(`// khotan-template-version: ${PKG_VERSION}`);
+      expect(content).toMatch(
+        /^\/\/ khotan-template-hash: sha256:[a-f0-9]{64}$/m,
+      );
       expect(content).toContain("export class Plug");
       expect(content).toContain("export function plug");
       expect(content).toContain("export function bearer");
@@ -989,6 +1037,147 @@ describe("CLI", { timeout: 30_000 }, () => {
 
       const content = fs.readFileSync(plugPath, "utf-8");
       expect(content).toBe("// modified by user");
+    });
+  });
+
+  describe("doctor and upgrade", () => {
+    interface ScaffoldFileJson {
+      relPath: string;
+      templateName: string;
+      status: string;
+      owner: string;
+      canUpgrade: boolean;
+      stamp: { version: string } | null;
+    }
+
+    interface ScaffoldCommandJson {
+      ok: boolean;
+      packageVersion: string;
+      outputDir: string;
+      summary?: Record<string, number>;
+      files?: ScaffoldFileJson[];
+      updated?: ScaffoldFileJson[];
+      skipped?: ScaffoldFileJson[];
+    }
+
+    function parseScaffoldJson(output: string): ScaffoldCommandJson {
+      return parseCliJson(output) as unknown as ScaffoldCommandJson;
+    }
+
+    it("reports current stamped generated files", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      run("init", tmpDir);
+      run("add plug", tmpDir);
+
+      const result = run("doctor --json", tmpDir);
+      expect(result.exitCode).toBe(0);
+      const data = parseScaffoldJson(result.output);
+      expect(data.packageVersion).toBe(PKG_VERSION);
+
+      const plug = data.files?.find(
+        (file) => file.relPath === "khotan/plugs/plug.ts",
+      );
+      expect(plug).toMatchObject({
+        templateName: "plug.ts",
+        status: "current",
+        owner: "khotan",
+        canUpgrade: false,
+      });
+    });
+
+    it("reports stale unchanged generated files as upgradeable", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      run("init", tmpDir);
+      run("add plug", tmpDir);
+      const plugPath = path.join(tmpDir, "khotan", "plugs", "plug.ts");
+      setGeneratedVersion(plugPath, "0.0.0");
+
+      const result = run("doctor --json --check", tmpDir);
+      expect(result.exitCode).toBe(1);
+      const data = parseScaffoldJson(result.output);
+      expect(data.summary?.stale).toBe(1);
+
+      const plug = data.files?.find(
+        (file) => file.relPath === "khotan/plugs/plug.ts",
+      );
+      expect(plug).toMatchObject({
+        status: "stale",
+        owner: "khotan",
+        canUpgrade: true,
+      });
+      expect(plug?.stamp?.version).toBe("0.0.0");
+    });
+
+    it("upgrades stale generated files that are unchanged since generation", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      run("init", tmpDir);
+      run("add plug", tmpDir);
+      const plugPath = path.join(tmpDir, "khotan", "plugs", "plug.ts");
+      setGeneratedVersion(plugPath, "0.0.0");
+
+      const result = run("upgrade --json", tmpDir);
+      expect(result.exitCode).toBe(0);
+      const data = parseScaffoldJson(result.output);
+      expect(data.updated).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            relPath: "khotan/plugs/plug.ts",
+            templateName: "plug.ts",
+            status: "stale",
+          }),
+        ]),
+      );
+
+      const updated = fs.readFileSync(plugPath, "utf-8");
+      expect(updated).toContain(`// khotan-template-version: ${PKG_VERSION}`);
+      expect(updated).not.toContain("// khotan-template-version: 0.0.0");
+    });
+
+    it("skips stale generated files with local edits", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      run("init", tmpDir);
+      run("add plug", tmpDir);
+      const plugPath = path.join(tmpDir, "khotan", "plugs", "plug.ts");
+      setGeneratedVersion(plugPath, "0.0.0");
+      fs.appendFileSync(plugPath, "\n// local edit\n", "utf-8");
+
+      const result = run("upgrade --json", tmpDir);
+      expect(result.exitCode).toBe(0);
+      const data = parseScaffoldJson(result.output);
+      expect(data.updated ?? []).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ relPath: "khotan/plugs/plug.ts" }),
+        ]),
+      );
+      expect(data.skipped).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            relPath: "khotan/plugs/plug.ts",
+            status: "modified",
+          }),
+        ]),
+      );
+      expect(fs.readFileSync(plugPath, "utf-8")).toContain("// local edit");
+    });
+
+    it("distinguishes app-owned files at scaffold paths", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      run("init", tmpDir);
+      const plugPath = path.join(tmpDir, "khotan", "plugs", "plug.ts");
+      fs.mkdirSync(path.dirname(plugPath), { recursive: true });
+      fs.writeFileSync(plugPath, "export const appOwned = true;\n", "utf-8");
+
+      const result = run("doctor --json", tmpDir);
+      expect(result.exitCode).toBe(0);
+      const data = parseScaffoldJson(result.output);
+      const plug = data.files?.find(
+        (file) => file.relPath === "khotan/plugs/plug.ts",
+      );
+      expect(plug).toMatchObject({
+        status: "app-owned",
+        owner: "app",
+        canUpgrade: false,
+      });
     });
   });
 

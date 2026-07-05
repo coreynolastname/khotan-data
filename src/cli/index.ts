@@ -14,6 +14,8 @@ import { whoamiCommand } from "./commands/whoami.js";
 import { databasesCommand } from "./commands/databases.js";
 import { appsCommand } from "./commands/apps.js";
 import { bootstrapCommand } from "./commands/bootstrap.js";
+import { doctorCommand } from "./commands/doctor.js";
+import { upgradeCommand } from "./commands/upgrade.js";
 import { loadEnvFileIntoProcess } from "./cli-api.js";
 
 const __cliDirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,5 +56,7 @@ program.addCommand(whoamiCommand);
 program.addCommand(databasesCommand);
 program.addCommand(appsCommand);
 program.addCommand(bootstrapCommand);
+program.addCommand(doctorCommand);
+program.addCommand(upgradeCommand);
 
 program.parse();

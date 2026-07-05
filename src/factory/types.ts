@@ -445,6 +445,15 @@ export interface PassRegistration {
   workflow: (ctx: PassWorkflowContext) => Promise<void>;
 }
 
+export type PassWorkflow = (ctx: PassWorkflowContext) => Promise<void>;
+
+export interface PassConfig {
+  name: string;
+  to: string;
+  events?: string[];
+  workflow: PassWorkflow;
+}
+
 export type WebhookRegistration = CatchRegistration | PassRegistration;
 
 export interface CacheScope {
@@ -1198,6 +1207,19 @@ export function catchEvent<
   if (config.schema !== undefined) registration.schema = config.schema;
   return registration;
 }
+
+export function pass(config: PassConfig): PassRegistration {
+  const registration: PassRegistration = {
+    type: "pass",
+    name: config.name,
+    to: config.to,
+    workflow: config.workflow,
+  };
+  if (config.events !== undefined) registration.events = config.events;
+  return registration;
+}
+
+export const passEvent = pass;
 
 export function wire(config: WireConfig): WireRegistration {
   return config;
