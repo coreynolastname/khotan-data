@@ -116,6 +116,12 @@ export type {
   WorkflowRuntimeConfig,
   WorkflowStartFn,
 } from "./workflow.js";
+export type {
+  KhotanRuntimeDatabaseColumn,
+  KhotanRuntimeDatabaseIndex,
+  KhotanRuntimeDatabaseState,
+  KhotanRuntimeSchemaCheck,
+} from "./runtime-schema.js";
 
 // CLI auth (deriveCliToken is used by the CLI package)
 export { deriveCliToken } from "./cli-auth.js";
@@ -144,3 +150,12 @@ export { slackNotifier } from "./notifiers.js";
 
 // Inbound destination ingest endpoints
 export { ingest } from "./ingest.js";
+
+// Runtime schema metadata and migration helpers
+export {
+  KHOTAN_RUNTIME_SCHEMA_VERSION,
+  checkKhotanGeneratedSchemaSource,
+  checkKhotanRuntimeDatabaseState,
+  formatKhotanRuntimeSchemaCheck,
+  renderKhotanRuntimeMigrationSql,
+} from "./runtime-schema.js";

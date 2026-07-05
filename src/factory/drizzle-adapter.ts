@@ -14,6 +14,7 @@ import {
 } from "./schema.js";
 import type { FlowType, KhotanAdapter, KhotanRunStatus } from "./types.js";
 import { serializeConnectField, deserializeConnectField } from "./helpers.js";
+import { loadKhotanRuntimeDatabaseState } from "./runtime-schema.js";
 
 export type KhotanDrizzleDatabase<
   TQueryResult extends PgQueryResultHKT = PgQueryResultHKT,
@@ -28,6 +29,12 @@ export function drizzleAdapter<
   TFullSchema extends Record<string, unknown>,
 >(db: KhotanDrizzleDatabase<TQueryResult, TFullSchema>): KhotanAdapter {
   return {
+    async getRuntimeSchemaState() {
+      return loadKhotanRuntimeDatabaseState(async (query) => {
+        return rowsFromExecuteResult(await db.execute(sql.raw(query)));
+      });
+    },
+
     async upsertPlug(plug) {
       const rows = await db
         .insert(khotanPlugs)
@@ -1036,4 +1043,18 @@ export function drizzleAdapter<
         .where(eq(khotanFlows.id, flowId));
     },
   };
+}
+
+function rowsFromExecuteResult(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) {
+    return result.filter(isRecord);
+  }
+  if (isRecord(result) && Array.isArray(result["rows"])) {
+    return result["rows"].filter(isRecord);
+  }
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

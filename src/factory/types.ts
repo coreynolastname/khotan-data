@@ -2,6 +2,8 @@
 // Public types — all exported interfaces and type aliases for the factory.
 // ---------------------------------------------------------------------------
 
+import type { KhotanRuntimeDatabaseState } from "./runtime-schema.js";
+
 export type ResourceConnectField = string | [string, ...string[]];
 
 export interface ResourcePlugParticipation {
@@ -629,6 +631,7 @@ export interface PlugRegistration {
 }
 
 export interface KhotanAdapter {
+  getRuntimeSchemaState?(): Promise<KhotanRuntimeDatabaseState>;
   upsertPlug(plug: {
     name: string;
     baseUrl: string;

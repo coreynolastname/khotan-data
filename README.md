@@ -47,6 +47,10 @@ npx khotan-data add config-page-1   # /config page that renders the KhotanHub da
 npx khotan-data add schema --force   # Overwrite existing files without prompting
 npx khotan-data add hub --yes        # Non-interactive mode: auto-accept all prompts
 npx khotan-data generate --force     # Regenerate schema (prompts before overwriting by default)
+npx khotan-data doctor               # Check generated schema + live DB shape when DATABASE_URL is set
+npx khotan-data migrate --runtime    # Also apply Khotan-owned runtime table upgrades
+npx khotan-data migrate --runtime-only
+npx khotan-data migrate --print-runtime-sql
 
 # Ops guardrails
 npx khotan-data --env-file .env.customer whoami --assert-org org_123
@@ -60,6 +64,26 @@ an explicit `--env-file`, then fails fast when `--assert-org` does not match.
 Database and app env commands write `khotan.bindings.json` only; they do not
 call provider APIs or synthesize database URLs. Use the recorded `databaseId`
 with your platform-specific deployment tooling.
+
+### Runtime Schema Ownership
+
+Generated `khotan.ts` schema files include `KHOTAN_RUNTIME_SCHEMA_VERSION`.
+That version belongs to Khotan-owned runtime tables such as `khotan_runs`,
+`khotan_webhook_events`, caches, mappings, and the singleton
+`khotan_runtime_schema` metadata row. Your app still owns its Drizzle migration
+folder and business tables.
+
+Use `npx khotan-data doctor` before deploys or package upgrades. It checks the
+generated schema file and, when `DATABASE_URL` is set, the live Postgres table
+shape for required Khotan columns and indexes. `drizzleAdapter(db)` runs the
+same database-shape check during `khotanData.init()` and fails before writes
+when required runtime columns or indexes are missing.
+
+Use `npx khotan-data migrate` for the normal app Drizzle flow. Add
+`--runtime` to apply idempotent Khotan-owned table upgrades after the Drizzle
+migration, or `--runtime-only` when you only need the Khotan runtime patch set.
+`--print-runtime-sql` prints the same SQL for teams that prefer to commit it
+inside their app migration history.
 
 ## Factory (Runtime Engine)
 

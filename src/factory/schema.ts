@@ -10,49 +10,66 @@ import {
 } from "drizzle-orm/pg-core";
 import type { InferSelectModel } from "drizzle-orm";
 import type { CacheScope } from "./types.js";
+export { KHOTAN_RUNTIME_SCHEMA_VERSION } from "./runtime-schema.js";
 
 // ---------------------------------------------------------------------------
 // Internal schema — mirrors the scaffolded template so the factory can query
 // the same tables without importing from the user's project.
 // ---------------------------------------------------------------------------
 
-export const khotanPlugs = pgTable("khotan_plugs", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
-  name: text("name").notNull().unique(),
-  baseUrl: text("base_url").notNull(),
-  authType: text("auth_type").notNull(),
-  enabled: boolean("enabled").default(true).notNull(),
-  status: text("status", {
-    enum: ["connected", "error", "idle"],
-  })
-    .default("idle")
-    .notNull(),
-  statusMessage: text("status_message"),
-  encryptedVars: text("encrypted_vars"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
+export const khotanRuntimeSchema = pgTable("khotan_runtime_schema", {
+  id: text("id").primaryKey().default("runtime"),
+  version: integer("version").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
 });
 
-export const khotanResources = pgTable("khotan_resources", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
-  name: text("name").notNull().unique(),
-  connectField: text("connect_field").notNull(),
-  description: text("description"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
-});
+export const khotanPlugs = pgTable(
+  "khotan_plugs",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    name: text("name").notNull(),
+    baseUrl: text("base_url").notNull(),
+    authType: text("auth_type").notNull(),
+    enabled: boolean("enabled").default(true).notNull(),
+    status: text("status", {
+      enum: ["connected", "error", "idle"],
+    })
+      .default("idle")
+      .notNull(),
+    statusMessage: text("status_message"),
+    encryptedVars: text("encrypted_vars"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [unique("khotan_plugs_name_unique").on(table.name)],
+);
+
+export const khotanResources = pgTable(
+  "khotan_resources",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    name: text("name").notNull(),
+    connectField: text("connect_field").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [unique("khotan_resources_name_unique").on(table.name)],
+);
 
 export const khotanFlows = pgTable(
   "khotan_flows",
@@ -260,7 +277,7 @@ export const khotanCaches = pgTable(
     id: text("id")
       .primaryKey()
       .$defaultFn(() => crypto.randomUUID()),
-    name: text("name").notNull().unique(),
+    name: text("name").notNull(),
     scope: jsonb("scope").$type<CacheScope>(),
     ttlSeconds: integer("ttl_seconds"),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -270,7 +287,10 @@ export const khotanCaches = pgTable(
       .defaultNow()
       .notNull(),
   },
-  (table) => [index("khotan_caches_name_idx").on(table.name)],
+  (table) => [
+    unique("khotan_caches_name_unique").on(table.name),
+    index("khotan_caches_name_idx").on(table.name),
+  ],
 );
 
 export const khotanCacheEntries = pgTable(
@@ -315,3 +335,4 @@ export type RunRow = InferSelectModel<typeof khotanRuns>;
 export type MappingRow = InferSelectModel<typeof khotanMappingsTable>;
 export type CacheRow = InferSelectModel<typeof khotanCaches>;
 export type CacheEntryRow = InferSelectModel<typeof khotanCacheEntries>;
+export type RuntimeSchemaRow = InferSelectModel<typeof khotanRuntimeSchema>;
