@@ -45,6 +45,8 @@ interface Flow {
   type: "inflow" | "outflow" | "relay" | "webhook";
   enabled: boolean;
   schedule: string | null;
+  effectiveSchedule?: string | null;
+  variants?: Record<string, { schedule?: string | null }>;
   lastRunAt: string | null;
   lastRunStatus:
     | "pending"
@@ -408,7 +410,7 @@ export function KhotanHub({
                             : `from ${flow.plugName ?? "source"}`}
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {flow.schedule ?? "—"}
+                          {flow.effectiveSchedule ?? flow.schedule ?? "—"}
                         </TableCell>
                         <TableCell>
                           {flow.lastRunStatus ? (

@@ -682,6 +682,53 @@ describe("cron dispatcher per-variant scheduling", () => {
 });
 
 // ---------------------------------------------------------------------------
+// API visibility for variant-backed schedules
+// ---------------------------------------------------------------------------
+
+describe("flow schedule visibility", () => {
+  it("exposes a default variant schedule as the flow's effective schedule", async () => {
+    const { adapter, flowStore } = createMockAdapter();
+    const instance = khotan({
+      adapter,
+      authorize: false,
+      plugs: [
+        makePlug([
+          {
+            name: "items-inflow",
+            type: "inflow",
+            variants: {
+              default: { schedule: "5 * * * *" },
+              backfill: {},
+            },
+          },
+        ]),
+      ],
+    });
+
+    await instance.init();
+    const persistedFlow = [...flowStore.values()][0]!;
+    expect(persistedFlow.schedule).toBeNull();
+
+    const res = await instance.handler(
+      new Request("http://localhost/api/khotan/flows"),
+    );
+    const body = (await res.json()) as Array<Record<string, unknown>>;
+
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({
+      name: "items-inflow",
+      schedule: "5 * * * *",
+      effectiveSchedule: "5 * * * *",
+      variants: {
+        default: { schedule: "5 * * * *" },
+        backfill: {},
+      },
+    });
+    instance.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // slackNotifier (task 8.4)
 // ---------------------------------------------------------------------------
 

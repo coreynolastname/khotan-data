@@ -253,7 +253,10 @@ single dispatcher cron instead of one platform cron per flow.
 
 Then set `schedule` on each flow (or per variant). The dispatcher evaluates
 every flow × variant on each tick and starts any whose `schedule` is due,
-passing that variant name. Variants without a `schedule` are manual-only. If
+passing that variant name. Keep the dispatcher cron at least as frequent as the
+smallest flow/variant schedule granularity. For minute-level or staggered
+schedules, use `* * * * *`; an hourly dispatcher only catches non-hourly runs
+later as overdue. Variants without a `schedule` are manual-only. If
 `CRON_SECRET` is set, Vercel calls the route with
 `Authorization: Bearer <CRON_SECRET>`.
 

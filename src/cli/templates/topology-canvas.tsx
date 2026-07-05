@@ -59,6 +59,8 @@ interface FlowRecord {
   type: FlowType;
   enabled: boolean;
   schedule?: string | null;
+  effectiveSchedule?: string | null;
+  variants?: Record<string, { schedule?: string | null }>;
   plugName?: string | null;
   lastRunStatus?: RunStatus;
   lastRunAt?: string | null;
@@ -385,7 +387,11 @@ function buildTopologyModel(snapshot: TopologySnapshot): TopologyModel {
       lane: "flow",
       label: flow.name,
       subtitle: FLOW_TYPE_LABEL[flow.type],
-      detail: flow.schedule ?? flow.lastRunStatus ?? "manual trigger",
+      detail:
+        flow.effectiveSchedule ??
+        flow.schedule ??
+        flow.lastRunStatus ??
+        "manual trigger",
       health,
       muted: !flow.enabled,
       ownerPlugId: flow.plugId,

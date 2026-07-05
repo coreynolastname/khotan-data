@@ -792,6 +792,9 @@ describe("CLI", { timeout: 30_000 }, () => {
       const result = run("add cron", tmpDir);
       expect(result.exitCode).toBe(0);
       expect(result.output).toContain("cron dispatcher");
+      expect(result.output).toContain(
+        "minute-level flow/variant schedules are checked each minute",
+      );
 
       const vercel = JSON.parse(
         fs.readFileSync(path.join(tmpDir, "vercel.json"), "utf-8"),
@@ -820,6 +823,34 @@ describe("CLI", { timeout: 30_000 }, () => {
         path: "/api/khotan/cron",
         schedule: "* * * * *",
       });
+    });
+
+    it("warns when an existing Vercel cron dispatcher may be too sparse", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, "vercel.json"),
+        JSON.stringify(
+          {
+            crons: [{ path: "/api/khotan/cron", schedule: "0 * * * *" }],
+          },
+          null,
+          2,
+        ),
+      );
+      run("init", tmpDir);
+      const result = run("add cron", tmpDir);
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("may delay minute-level flow schedules");
+      expect(result.output).toContain(
+        "smallest flow/variant schedule granularity",
+      );
+
+      const vercel = JSON.parse(
+        fs.readFileSync(path.join(tmpDir, "vercel.json"), "utf-8"),
+      ) as { crons: Array<{ path: string; schedule: string }> };
+      expect(vercel.crons).toEqual([
+        { path: "/api/khotan/cron", schedule: "0 * * * *" },
+      ]);
     });
 
     it("prints Drizzle re-export hint when no barrel file exists", () => {
@@ -2127,6 +2158,8 @@ describe("CLI", { timeout: 30_000 }, () => {
       const content = fs.readFileSync(hubPath, "utf-8");
       expect(content).toContain('"PATCH"');
       expect(content).toContain("/api/khotan/flows");
+      expect(content).toContain("effectiveSchedule");
+      expect(content).toContain("flow.effectiveSchedule ?? flow.schedule");
       expect(content).not.toContain("/api/khotan/syncs");
       expect(content).not.toContain('method: "PUT"');
     });
