@@ -75,3 +75,10 @@ export default khotanData;
 // `flow(name).start(options)` is the single entry point — there is no
 // `khotanData.api.*` surface. `plugName` only disambiguates when the same flow
 // name is registered under multiple plugs.
+//
+// Workflow-backed flows need Workflow compiler metadata. Call `.start()` from
+// compiled Next server code (route handler, server action, cron path), not from
+// a raw Node/Bun script that imports this file. For local script/QA testing,
+// run the app (`npm run dev`) and use:
+//
+//   npx khotan-data flows trigger products-inflow --plug stripe --variant delta

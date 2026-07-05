@@ -3595,6 +3595,61 @@ describe("khotan factory", () => {
       );
     });
 
+    it("flow().start explains direct-script workflow metadata failures", async () => {
+      const workflow = vi.fn(async () => undefined);
+      __setWorkflowStartForTests(
+        vi.fn(async () => {
+          throw Object.assign(new Error("Workflow metadata missing"), {
+            code: "start-invalid-workflow-function",
+          });
+        }),
+      );
+
+      const flowInstance = khotanOpen({
+        adapter,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow", workflow }],
+          },
+        ],
+      });
+
+      let thrown: unknown;
+      try {
+        await flowInstance.flow("products").start({ variant: "delta" });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      const error = thrown as Error & { code?: string };
+      expect(error.code).toBe("khotan_invalid_workflow_function");
+      expect(error.message).toContain('flow "products" on plug "stripe"');
+      expect(error.message).toContain("raw Node/Bun script");
+      expect(error.message).toContain(
+        "npx khotan-data flows trigger products delta --plug stripe",
+      );
+      expect(error.message).toContain("/api/khotan/flows/flow-1/runs");
+      expect(error.message).toContain("withWorkflow()");
+      expect(adapter.updateRun).toHaveBeenCalledWith(
+        "run-1",
+        expect.objectContaining({
+          status: "failed",
+          error: expect.stringContaining("raw Node/Bun script"),
+        }),
+      );
+    });
+
     it("flow().start requires plugName when a flow name is ambiguous", async () => {
       const run = vi.fn(async () => undefined);
       const flowInstance = khotanOpen({

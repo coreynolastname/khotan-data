@@ -121,6 +121,12 @@ await khotanData.flow("products-inflow", { plugName: "shopify" }).start({
 });
 ```
 
+For Workflow-backed flows, call `.start()` from compiled Next server code
+(route handler, server action, cron path). Raw Node/Bun scripts that import
+source workflow files can miss Workflow compiler metadata and fail with
+`start-invalid-workflow-function`; for local script/QA testing, run the app and
+use `npx khotan-data flows trigger products-inflow --plug shopify`.
+
 ### Lifecycle Hooks And Stuck Runs
 
 Use factory-level hooks when operational logging or notifications should cover
