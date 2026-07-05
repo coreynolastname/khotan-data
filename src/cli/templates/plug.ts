@@ -754,6 +754,12 @@ export interface PaginationInspector<T = unknown> {
   interPageDelayMs?: number;
 }
 
+function isPaginationStrategy<T>(
+  pagination: PaginationStrategy | PaginationInspector<T>,
+): pagination is PaginationStrategy {
+  return "getDataPath" in pagination;
+}
+
 export function cursorPagination(config: {
   cursorParam: string;
   cursorPath: string;
@@ -1286,9 +1292,11 @@ export class Plug<V extends readonly VarField[] = VarField[]> {
       );
 
       const data = (
-        "getItems" in pagination && pagination.getItems
+        pagination.getItems
           ? pagination.getItems(response)
-          : getByPath(response, pagination.getDataPath())
+          : isPaginationStrategy(pagination)
+            ? getByPath(response, pagination.getDataPath())
+            : undefined
       ) as T[] | undefined;
       if (!data || data.length === 0) break;
 
@@ -1301,7 +1309,9 @@ export class Plug<V extends readonly VarField[] = VarField[]> {
 
       const next =
         pagination.getNext?.(response, currentParams, data) ??
-        pagination.getNextParams?.(response, currentParams);
+        (isPaginationStrategy(pagination)
+          ? pagination.getNextParams?.(response, currentParams)
+          : undefined);
       if (!next) break;
 
       if (typeof next === "string" || next instanceof URL) {

@@ -1,0 +1,24 @@
+{
+  "name": "khotan-e2e-next14-root-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "next": "14.2.35",
+    "postgres": "^3.4.9",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "drizzle-kit": "^0.31.8",
+    "typescript": "^6.0.3"
+  }
+}

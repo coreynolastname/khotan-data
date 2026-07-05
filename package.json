@@ -115,6 +115,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "e2e": "node e2e/run.mjs",
+    "playground": "node scripts/playground.mjs",
+    "playground:install": "node scripts/playground.mjs --install-only",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -162,6 +165,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.4",
+    "@electric-sql/pglite": "^0.5.4",
     "@eslint/js": "^9.28.0",
     "@types/node": "^26.0.1",
     "@types/prompts": "^2.4.9",
