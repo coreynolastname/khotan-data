@@ -151,6 +151,9 @@ If a worker is interrupted and leaves a run in `pending` or `running`, reconcile
 stale rows programmatically or through the management API. The Drizzle adapter
 uses a guarded update so concurrent reconcilers do not double-claim the same
 run.
+Run detail and run-list management endpoints also reconcile a non-terminal
+Khotan run when its Workflow run already reports `completed`, `failed`, or
+`cancelled`, and update `khotan_flows.last_run_status` for the owning flow.
 
 ```typescript
 await khotanData.flow("products-inflow").reconcileStuck({

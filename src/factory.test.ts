@@ -3187,6 +3187,145 @@ describe("khotan factory", () => {
       });
     });
 
+    it("GET /api/khotan/runs/:id reconciles terminal workflow status", async () => {
+      __setWorkflowGetRunForTests(
+        vi.fn(() => ({
+          status: Promise.resolve("completed"),
+        })),
+      );
+      const onFlowRunComplete = vi.fn();
+
+      const flowInstance = khotan({
+        adapter,
+        authorize: false,
+        onFlowRunComplete,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow" }],
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      const { id } = await adapter.insertRun({
+        flowId: "flow-1",
+        workflowRunId: "workflow-run-1",
+        variant: "default",
+        source: "manual",
+        status: "running",
+      });
+      const run = await adapter.getRun(id);
+      expect(run).not.toBeNull();
+      run!["startedAt"] = new Date(Date.now() - 60_000);
+
+      const res = await flowInstance.handler(
+        makeRequest(`/api/khotan/runs/${id}`),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        id,
+        status: "completed",
+        workflowRunId: "workflow-run-1",
+        workflowStatus: "completed",
+        error: null,
+      });
+      expect(body["completedAt"]).toEqual(expect.any(String));
+      expect(body["durationMs"]).toEqual(expect.any(Number));
+      await expect(adapter.getRun(id)).resolves.toMatchObject({
+        status: "completed",
+        error: null,
+      });
+      expect(adapter.updateFlowLastRun).toHaveBeenCalledWith(
+        "flow-1",
+        expect.objectContaining({ lastRunStatus: "completed" }),
+      );
+      expect(onFlowRunComplete).toHaveBeenCalledTimes(1);
+      expect(onFlowRunComplete.mock.calls[0]![1]).toMatchObject({
+        id,
+        status: "completed",
+      });
+    });
+
+    it("GET /api/khotan/runs reconciles terminal workflow status in run lists", async () => {
+      __setWorkflowGetRunForTests(
+        vi.fn(() => ({
+          status: Promise.resolve("failed"),
+        })),
+      );
+      const onFlowRunFailed = vi.fn();
+
+      const flowInstance = khotan({
+        adapter,
+        authorize: false,
+        onFlowRunFailed,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow" }],
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      const { id } = await adapter.insertRun({
+        flowId: "flow-1",
+        workflowRunId: "workflow-run-1",
+        variant: "default",
+        source: "manual",
+        status: "running",
+      });
+      const run = await adapter.getRun(id);
+      expect(run).not.toBeNull();
+      run!["startedAt"] = new Date(Date.now() - 60_000);
+
+      const res = await flowInstance.handler(makeRequest("/api/khotan/runs"));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(body.items[0]).toMatchObject({
+        id,
+        status: "failed",
+        failed: 1,
+        workflowStatus: "failed",
+        error: "Workflow reported failed before khotan observed completion",
+      });
+      await expect(adapter.getRun(id)).resolves.toMatchObject({
+        status: "failed",
+        failed: 1,
+      });
+      expect(adapter.updateFlowLastRun).toHaveBeenCalledWith(
+        "flow-1",
+        expect.objectContaining({ lastRunStatus: "failed" }),
+      );
+      expect(onFlowRunFailed).toHaveBeenCalledTimes(1);
+      expect(onFlowRunFailed.mock.calls[0]![1]).toMatchObject({
+        id,
+        status: "failed",
+        error: "Workflow reported failed before khotan observed completion",
+      });
+    });
+
     it("GET /api/khotan/runs/:id/stream returns the workflow stream", async () => {
       const encoder = new TextEncoder();
       const workflow = vi.fn(async () => undefined);
