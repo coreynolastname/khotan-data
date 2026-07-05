@@ -1632,20 +1632,40 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       await completeRunOk(result);
     };
 
-    function observeWorkflowCompletion(workflowResult: unknown) {
-      const returnValue = getWorkflowReturnValue(workflowResult);
-      if (!returnValue) return;
+    function observeWorkflowCompletion(
+      workflowResult: unknown,
+      workflowRunId: string | null,
+    ) {
+      const completionWork = (async () => {
+        let returnValue = getWorkflowReturnValue(workflowResult);
 
-      void returnValue
-        .then(async (value) => {
+        if (!returnValue && workflowRunId) {
+          try {
+            const getRun = await importWorkflowGetRun();
+            returnValue = getWorkflowReturnValue(getRun(workflowRunId));
+          } catch (error) {
+            kd(
+              "flow",
+              `Failed to observe workflow run ${workflowRunId}`,
+              error,
+            );
+            return;
+          }
+        }
+
+        if (!returnValue) return;
+
+        try {
+          const value = await returnValue;
           await completeRunOk(toFlowRunResult(value));
-        })
-        .catch(async (error: unknown) => {
+        } catch (error: unknown) {
           await completeRunFailed(error);
-        })
-        .catch((error: unknown) => {
-          kd("flow", `Failed to reconcile workflow run ${runId}`, error);
-        });
+        }
+      })().catch((error: unknown) => {
+        kd("flow", `Failed to reconcile workflow run ${runId}`, error);
+      });
+
+      getWaitUntil()(completionWork);
     }
 
     try {
@@ -1698,7 +1718,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           });
         }
 
-        observeWorkflowCompletion(result);
+        observeWorkflowCompletion(result, workflowRunId);
 
         return Response.json({
           id: runId,
