@@ -107,6 +107,39 @@ describe("plug vars command", () => {
     });
   });
 
+  it("sets variables for a named profile", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse([{ name: "pollinate" }]))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, profile: "uat" }));
+
+    const { parsed, thrown } = await runPlugVarsAction([
+      "pollinate",
+      "set",
+      "--profile",
+      "uat",
+      "--json",
+      '{"apiKey":"secret"}',
+      "--base-path",
+      "/api/khotan",
+    ]);
+
+    expect(thrown).toBeNull();
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:3000/api/khotan/variables/pollinate?profile=uat",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ apiKey: "secret" }),
+      }),
+    );
+    expect(parsed[0]).toEqual({
+      ok: true,
+      action: "set",
+      plugName: "pollinate",
+      profile: "uat",
+    });
+  });
+
   it("lists variable state for all plugs", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(

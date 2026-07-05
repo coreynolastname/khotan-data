@@ -67,6 +67,8 @@ import type {
   StuckRunReconcileItem,
   KhotanRunStatus,
   KhotanTerminalRunUpdate,
+  PlugVarSelection,
+  PlugVarProfile,
 } from "./types.js";
 import { bindPlugWithVars, khotanRuntimeRegistry } from "./types.js";
 
@@ -298,6 +300,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     if (plugNames.has(plug.name)) {
       throw new Error(`Duplicate plug name: "${plug.name}"`);
     }
+    validatePlugProfiles(plug);
     plugNames.add(plug.name);
   }
 
@@ -622,6 +625,201 @@ export function khotan(config: KhotanConfig): KhotanInstance {
   // Var management
   // -------------------------------------------------------------------------
 
+  const VAR_PROFILES_KEY = "__khotan_profiles";
+
+  interface StoredPlugVarsDocument {
+    base: Record<string, string>;
+    profiles: Record<string, Record<string, string>>;
+  }
+
+  function normalizeProfileName(value: unknown): string | undefined {
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  }
+
+  function coerceStringRecord(value: unknown): Record<string, string> {
+    if (!isPlainObject(value)) return {};
+    const record: Record<string, string> = {};
+    for (const [key, raw] of Object.entries(value)) {
+      if (typeof raw === "string") {
+        record[key] = raw;
+      }
+    }
+    return record;
+  }
+
+  function normalizePlugProfile(
+    profileName: string,
+    profile: PlugVarProfile,
+  ): PlugVarProfile {
+    if (!isPlainObject(profile)) {
+      throw new Error(
+        `Plug var profile "${profileName}" must be an object with optional vars/defaults`,
+      );
+    }
+
+    const profileVars = profile["vars"];
+    const profileDefaults = profile["defaults"];
+    const vars = profileVars ?? profileDefaults;
+    if (vars !== undefined && !isPlainObject(vars)) {
+      throw new Error(
+        `Plug var profile "${profileName}" vars must be an object of strings`,
+      );
+    }
+
+    return {
+      ...(typeof profile["label"] === "string"
+        ? { label: profile["label"] }
+        : {}),
+      ...(profileVars !== undefined
+        ? { vars: coerceStringRecord(profileVars) }
+        : {}),
+      ...(profileDefaults !== undefined
+        ? { defaults: coerceStringRecord(profileDefaults) }
+        : {}),
+    };
+  }
+
+  function validatePlugProfiles(plug: PlugRegistration): void {
+    const seen = new Set<string>();
+    for (const [source, profiles] of [
+      ["profiles", plug.profiles],
+      ["targets", plug.targets],
+    ] as const) {
+      if (!profiles) continue;
+      if (!isPlainObject(profiles)) {
+        throw new Error(`Plug "${plug.name}" ${source} must be an object`);
+      }
+      for (const [rawName, profile] of Object.entries(profiles)) {
+        const profileName = normalizeProfileName(rawName);
+        if (!profileName) {
+          throw new Error(`Plug "${plug.name}" has an empty profile name`);
+        }
+        if (seen.has(profileName)) {
+          throw new Error(
+            `Plug "${plug.name}" declares duplicate profile/target "${profileName}"`,
+          );
+        }
+        normalizePlugProfile(profileName, profile);
+        seen.add(profileName);
+      }
+    }
+
+    const defaultProfile = normalizeProfileName(
+      plug.defaultProfile ?? plug.defaultTarget,
+    );
+    if (defaultProfile && seen.size > 0 && !seen.has(defaultProfile)) {
+      throw new Error(
+        `Plug "${plug.name}" default profile "${defaultProfile}" is not declared in profiles/targets`,
+      );
+    }
+  }
+
+  function getPlugRegistration(plugName: string): PlugRegistration {
+    const plugReg = plugs.find((p) => p.name === plugName);
+    if (!plugReg) {
+      throw new Error(`Plug "${plugName}" not registered`);
+    }
+    return plugReg;
+  }
+
+  function getProfileSelection(
+    plugName: string,
+    selection?: PlugVarSelection,
+  ): string | undefined {
+    return (
+      normalizeProfileName(selection?.profile) ??
+      normalizeProfileName(selection?.target) ??
+      normalizeProfileName(
+        getPlugRegistration(plugName).defaultProfile ??
+          getPlugRegistration(plugName).defaultTarget,
+      )
+    );
+  }
+
+  function getPlugProfileMap(plugName: string): Map<string, PlugVarProfile> {
+    const plugReg = getPlugRegistration(plugName);
+    const profiles = new Map<string, PlugVarProfile>();
+    for (const source of [plugReg.profiles, plugReg.targets]) {
+      if (!source) continue;
+      for (const [rawName, rawProfile] of Object.entries(source)) {
+        const profileName = normalizeProfileName(rawName);
+        if (!profileName) continue;
+        profiles.set(
+          profileName,
+          normalizePlugProfile(profileName, rawProfile),
+        );
+      }
+    }
+    return profiles;
+  }
+
+  function getProfileDefaultVars(
+    plugName: string,
+    profileName: string | undefined,
+  ): Record<string, string> {
+    if (!profileName) return {};
+    const profile = getPlugProfileMap(plugName).get(profileName);
+    return coerceStringRecord(profile?.vars ?? profile?.defaults ?? {});
+  }
+
+  function getBaseDefaultVars(plugName: string): Record<string, string> {
+    const defaults: Record<string, string> = {};
+    for (const field of getVarFields(plugName)) {
+      if (field.defaultValue !== undefined) {
+        defaults[field.key] = field.defaultValue;
+      }
+    }
+    return defaults;
+  }
+
+  function getDefaultVars(
+    plugName: string,
+    selection?: PlugVarSelection,
+  ): Record<string, string> {
+    const profile = getProfileSelection(plugName, selection);
+    return {
+      ...getBaseDefaultVars(plugName),
+      ...getProfileDefaultVars(plugName, profile),
+    };
+  }
+
+  function parseStoredVarsDocument(value: unknown): StoredPlugVarsDocument {
+    const base: Record<string, string> = {};
+    const profiles: Record<string, Record<string, string>> = {};
+    if (!isPlainObject(value)) return { base, profiles };
+
+    for (const [key, raw] of Object.entries(value)) {
+      if (key === VAR_PROFILES_KEY) continue;
+      if (typeof raw === "string") {
+        base[key] = raw;
+      }
+    }
+
+    const rawProfiles = value[VAR_PROFILES_KEY];
+    if (isPlainObject(rawProfiles)) {
+      for (const [rawName, rawVars] of Object.entries(rawProfiles)) {
+        const profileName = normalizeProfileName(rawName);
+        if (!profileName) continue;
+        profiles[profileName] = coerceStringRecord(rawVars);
+      }
+    }
+
+    return { base, profiles };
+  }
+
+  function serializeStoredVarsDocument(
+    document: StoredPlugVarsDocument,
+  ): Record<string, unknown> {
+    const serialized: Record<string, unknown> = { ...document.base };
+    const profileEntries = Object.entries(document.profiles).filter(
+      ([, vars]) => Object.keys(vars).length > 0,
+    );
+    if (profileEntries.length > 0) {
+      serialized[VAR_PROFILES_KEY] = Object.fromEntries(profileEntries);
+    }
+    return serialized;
+  }
+
   async function resolvePlugId(plugName: string): Promise<string> {
     await init();
     const allPlugs = await adapter.listPlugs();
@@ -632,45 +830,64 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     return dbPlug["id"] as string;
   }
 
-  function getDefaultVars(plugName: string): Record<string, string> {
-    const defaults: Record<string, string> = {};
-    for (const field of getVarFields(plugName)) {
-      if (field.defaultValue !== undefined) {
-        defaults[field.key] = field.defaultValue;
-      }
-    }
-    return defaults;
-  }
-
-  async function getStoredVarsByPlugId(
+  async function getStoredVarsDocumentByPlugId(
     plugId: string,
-  ): Promise<Record<string, string>> {
+  ): Promise<StoredPlugVarsDocument> {
     if (!secret) {
       throw new Error("KHOTAN_SECRET is required for var operations");
     }
     const encrypted = await adapter.getEncryptedVariables(plugId);
-    if (!encrypted) return {};
+    if (!encrypted) return { base: {}, profiles: {} };
     const json = await decryptVars(encrypted, secret);
-    return JSON.parse(json) as Record<string, string>;
+    return parseStoredVarsDocument(JSON.parse(json) as unknown);
+  }
+
+  async function setVarsDocumentByPlugId(
+    plugId: string,
+    document: StoredPlugVarsDocument,
+  ): Promise<void> {
+    if (!secret) {
+      throw new Error("KHOTAN_SECRET is required for var operations");
+    }
+    const json = JSON.stringify(serializeStoredVarsDocument(document));
+    const encrypted = await encryptVars(json, secret);
+    await adapter.setEncryptedVariables(plugId, encrypted);
+  }
+
+  async function getStoredVarsByPlugId(
+    plugId: string,
+    profile?: string,
+  ): Promise<Record<string, string>> {
+    const document = await getStoredVarsDocumentByPlugId(plugId);
+    return profile
+      ? { ...document.base, ...(document.profiles[profile] ?? {}) }
+      : document.base;
   }
 
   async function setVarsByPlugId(
     plugId: string,
     vars: Record<string, string>,
+    profile?: string,
   ): Promise<void> {
-    if (!secret) {
-      throw new Error("KHOTAN_SECRET is required for var operations");
+    const document = await getStoredVarsDocumentByPlugId(plugId).catch(
+      (): StoredPlugVarsDocument => ({
+        base: {},
+        profiles: {},
+      }),
+    );
+    if (profile) {
+      document.profiles[profile] = coerceStringRecord(vars);
+    } else {
+      document.base = coerceStringRecord(vars);
     }
-    const json = JSON.stringify(vars);
-    const encrypted = await encryptVars(json, secret);
-    await adapter.setEncryptedVariables(plugId, encrypted);
+    await setVarsDocumentByPlugId(plugId, document);
   }
 
   async function seedDefaultVarsForPlug(
     plugId: string,
     plugName: string,
   ): Promise<void> {
-    const defaults = getDefaultVars(plugName);
+    const defaults = getBaseDefaultVars(plugName);
     if (!secret || Object.keys(defaults).length === 0) {
       return;
     }
@@ -688,37 +905,64 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     }
   }
 
-  async function getVars(plugName: string): Promise<Record<string, string>> {
+  async function getVars(
+    plugName: string,
+    options?: PlugVarSelection,
+  ): Promise<Record<string, string>> {
     const plugId = await resolvePlugId(plugName);
-    const defaults = getDefaultVars(plugName);
-    const stored = await getStoredVarsByPlugId(plugId);
+    const profile = getProfileSelection(plugName, options);
+    const defaults = getDefaultVars(plugName, options);
+    const stored = await getStoredVarsByPlugId(plugId, profile);
     return { ...defaults, ...stored };
   }
 
   async function setVars(
     plugName: string,
     vars: Record<string, string>,
+    options?: PlugVarSelection,
   ): Promise<void> {
     const plugId = await resolvePlugId(plugName);
-    await setVarsByPlugId(plugId, vars);
+    const profile = getProfileSelection(plugName, options);
+    await setVarsByPlugId(plugId, vars, profile);
   }
 
-  async function clearVars(plugName: string): Promise<void> {
+  async function clearVars(
+    plugName: string,
+    options?: PlugVarSelection,
+  ): Promise<void> {
     const plugId = await resolvePlugId(plugName);
+    const profile = getProfileSelection(plugName, options);
+    if (profile) {
+      const document = await getStoredVarsDocumentByPlugId(plugId).catch(
+        (): StoredPlugVarsDocument => ({
+          base: {},
+          profiles: {},
+        }),
+      );
+      document.profiles = Object.fromEntries(
+        Object.entries(document.profiles).filter(([name]) => name !== profile),
+      );
+      await setVarsDocumentByPlugId(plugId, document);
+      return;
+    }
     await adapter.clearEncryptedVariables(plugId);
   }
 
-  async function hasVars(plugName: string): Promise<boolean> {
+  async function hasVars(
+    plugName: string,
+    options?: PlugVarSelection,
+  ): Promise<boolean> {
     const plugId = await resolvePlugId(plugName);
+    const profile = getProfileSelection(plugName, options);
     const encrypted = await adapter.getEncryptedVariables(plugId);
-    return encrypted !== null && encrypted !== "";
+    if (!encrypted) return false;
+    if (!profile) return true;
+    const document = await getStoredVarsDocumentByPlugId(plugId);
+    return Object.keys(document.profiles[profile] ?? {}).length > 0;
   }
 
   function getVarFields(plugName: string): readonly VarField[] {
-    const plugReg = plugs.find((p) => p.name === plugName);
-    if (!plugReg) {
-      throw new Error(`Plug "${plugName}" not registered`);
-    }
+    const plugReg = getPlugRegistration(plugName);
     return plugReg.vars ?? plugReg.plug.varFields ?? [];
   }
 
@@ -738,11 +982,61 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     );
   }
 
-  function getPlug(plugName: string): PlugRegistration["plug"] {
-    const plugReg = plugs.find((p) => p.name === plugName);
-    if (!plugReg) {
-      throw new Error(`Plug "${plugName}" not registered`);
+  function selectionFromSearchParams(
+    searchParams: URLSearchParams,
+  ): PlugVarSelection | undefined {
+    const profile =
+      normalizeProfileName(searchParams.get("profile")) ??
+      normalizeProfileName(searchParams.get("target"));
+    return profile ? { profile } : undefined;
+  }
+
+  function selectionForProfile(
+    profile: string | undefined,
+  ): PlugVarSelection | undefined {
+    return profile ? { profile } : undefined;
+  }
+
+  async function getVarProfileSummaries(plugName: string): Promise<
+    {
+      name: string;
+      label?: string;
+      configured: boolean;
+      default: boolean;
+    }[]
+  > {
+    const configured = getPlugProfileMap(plugName);
+    const names = new Set(configured.keys());
+    const defaultProfile = normalizeProfileName(
+      getPlugRegistration(plugName).defaultProfile ??
+        getPlugRegistration(plugName).defaultTarget,
+    );
+    if (defaultProfile) names.add(defaultProfile);
+
+    let storedProfiles: Record<string, Record<string, string>> = {};
+    if (secret) {
+      try {
+        const plugId = await resolvePlugId(plugName);
+        storedProfiles = (await getStoredVarsDocumentByPlugId(plugId)).profiles;
+        for (const name of Object.keys(storedProfiles)) names.add(name);
+      } catch {
+        storedProfiles = {};
+      }
     }
+
+    return [...names].sort().map((name) => {
+      const profile = configured.get(name);
+      const summary = {
+        name,
+        configured: Object.keys(storedProfiles[name] ?? {}).length > 0,
+        default: name === defaultProfile,
+      };
+      return profile?.label ? { ...summary, label: profile.label } : summary;
+    });
+  }
+
+  function getPlug(plugName: string): PlugRegistration["plug"] {
+    const plugReg = getPlugRegistration(plugName);
     return plugReg.plug;
   }
 
@@ -1094,7 +1388,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       vars: Record<string, string>,
       _setVars?: (updates: Record<string, string>) => Promise<void>,
     ) {
-      return bindPlugWithVars(plugReg!.plug, vars, _setVars);
+      return bindPlugWithVars(plugReg!.plug, vars, _setVars, { plugName });
     }
 
     async function getWireVars(
@@ -1162,8 +1456,10 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
         const vars = secret ? await getVars(plugName).catch(() => ({})) : {};
         const _setVars = secret
-          ? (updates: Record<string, string>) =>
-              setVars(plugName, { ...vars, ...updates })
+          ? async (updates: Record<string, string>) => {
+              Object.assign(vars, updates);
+              await setVars(plugName, { ...vars });
+            }
           : undefined;
         const boundPlug = createBoundPlug(vars, _setVars);
 
@@ -1239,8 +1535,10 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
         const vars = secret ? await getVars(plugName).catch(() => ({})) : {};
         const _setVars = secret
-          ? (updates: Record<string, string>) =>
-              setVars(plugName, { ...vars, ...updates })
+          ? async (updates: Record<string, string>) => {
+              Object.assign(vars, updates);
+              await setVars(plugName, { ...vars });
+            }
           : undefined;
         const boundPlug = createBoundPlug(vars, _setVars);
 
@@ -1304,8 +1602,10 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
         const vars = secret ? await getVars(plugName).catch(() => ({})) : {};
         const _setVars = secret
-          ? (updates: Record<string, string>) =>
-              setVars(plugName, { ...vars, ...updates })
+          ? async (updates: Record<string, string>) => {
+              Object.assign(vars, updates);
+              await setVars(plugName, { ...vars });
+            }
           : undefined;
         const boundPlug = createBoundPlug(vars, _setVars);
 
@@ -1436,6 +1736,23 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     const activeVariant: FlowVariant | undefined = variants[variant];
 
     const runBody = requestBody["body"];
+    const requestedRunProfile =
+      normalizeProfileName(requestBody["profile"]) ??
+      normalizeProfileName(requestBody["target"]);
+    const requestedPlugProfiles = {
+      ...coerceStringRecord(requestBody["plugProfiles"]),
+      ...coerceStringRecord(requestBody["plugTargets"]),
+    };
+    if (requestedRunProfile) {
+      requestedPlugProfiles[plugName] ??= requestedRunProfile;
+      if (flowReg.to && plugNames.has(flowReg.to)) {
+        requestedPlugProfiles[flowReg.to] ??= requestedRunProfile;
+      }
+    }
+    const sourceProfile = getProfileSelection(
+      plugName,
+      selectionForProfile(requestedPlugProfiles[plugName]),
+    );
     const initialMetadata = metadataFromFlowBody(runBody);
 
     const { id: runId } = await adapter.insertRun({
@@ -1649,22 +1966,55 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     }
 
     try {
-      const vars = secret ? await getVars(plugName).catch(() => ({})) : {};
+      const sourceSelection = sourceProfile
+        ? { profile: sourceProfile }
+        : undefined;
+      const vars = secret
+        ? await getVars(plugName, sourceSelection).catch(() => ({}))
+        : {};
       const setFlowVars = async (updates: Record<string, string>) => {
-        await setVars(plugName, { ...vars, ...updates });
+        Object.assign(vars, updates);
+        await setVars(plugName, { ...vars }, sourceSelection);
       };
       const boundPlug = bindPlugWithVars(
         plugReg.plug,
         vars,
         secret ? setFlowVars : undefined,
+        {
+          plugName,
+          ...(sourceProfile ? { profile: sourceProfile } : {}),
+          ...(sourceProfile ? { target: sourceProfile } : {}),
+        },
       );
+      const plugProfilesByName: Record<string, string | undefined> = {};
       const plugVarsByName: Record<string, Record<string, string>> = {
         [plugName]: vars,
       };
+      const plugVarProfilesByName: Record<
+        string,
+        Record<string, Record<string, string>>
+      > = {};
+      if (sourceProfile) {
+        plugProfilesByName[plugName] = sourceProfile;
+        plugVarProfilesByName[plugName] = { [sourceProfile]: vars };
+      }
       if (flowReg.to && plugNames.has(flowReg.to)) {
+        const destinationProfile = getProfileSelection(
+          flowReg.to,
+          selectionForProfile(requestedPlugProfiles[flowReg.to]),
+        );
         plugVarsByName[flowReg.to] = secret
-          ? await getVars(flowReg.to).catch(() => ({}))
+          ? await getVars(
+              flowReg.to,
+              destinationProfile ? { profile: destinationProfile } : undefined,
+            ).catch(() => ({}))
           : {};
+        if (destinationProfile) {
+          plugProfilesByName[flowReg.to] = destinationProfile;
+          plugVarProfilesByName[flowReg.to] = {
+            [destinationProfile]: plugVarsByName[flowReg.to]!,
+          };
+        }
       }
 
       const flowContext = {
@@ -1682,9 +2032,13 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           {
             flow: flowContext,
             variant,
+            profile: sourceProfile,
+            target: sourceProfile,
             body: runBody,
             vars,
             plugVarsByName,
+            plugProfilesByName,
+            plugVarProfilesByName,
             khotanRunId: runId,
             khotanInstanceId: instanceId,
           },
@@ -1706,6 +2060,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           workflowRunId,
           status: "running",
           variant,
+          ...(sourceProfile ? { profile: sourceProfile } : {}),
           source,
         });
       }
@@ -1716,6 +2071,8 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             plug: boundPlug,
             flow: flowContext,
             variant,
+            profile: sourceProfile,
+            target: sourceProfile,
             body: runBody,
             vars,
             setVars: setFlowVars,
@@ -1735,6 +2092,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         flowId,
         status,
         variant,
+        ...(sourceProfile ? { profile: sourceProfile } : {}),
         source,
         ...counters,
         error,
@@ -2605,21 +2963,33 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       method: "GET",
       pattern: "debug/:plugName",
       auth: "debug",
-      handler: async ({ params }) => {
+      handler: async ({ params, searchParams }) => {
         const plugName = params["plugName"]!;
         const plugReg = plugs.find((p) => p.name === plugName);
         if (!plugReg) {
           return Response.json({ error: "Plug not found" }, { status: 404 });
         }
+        const selectedProfile = getProfileSelection(
+          plugName,
+          selectionFromSearchParams(searchParams),
+        );
+        const selection = selectedProfile
+          ? { profile: selectedProfile }
+          : undefined;
         const fields = plugReg.vars ?? plugReg.plug.varFields ?? [];
-        const hasConfigured = await hasVars(plugName).catch(() => false);
+        const hasConfigured = await hasVars(plugName, selection).catch(
+          () => false,
+        );
         const rawEndpoints =
           plugReg.plug.endpoints ?? plugReg.endpoints ?? null;
 
         let varValues: Record<string, string> = {};
-        if (hasConfigured || Object.keys(getDefaultVars(plugName)).length > 0) {
+        if (
+          hasConfigured ||
+          Object.keys(getDefaultVars(plugName, selection)).length > 0
+        ) {
           try {
-            const raw = await getVars(plugName);
+            const raw = await getVars(plugName, selection);
             varValues = Object.fromEntries(
               Object.entries(maskVars(plugName, raw)).filter(([key]) => {
                 const field = fields.find((f) => f.key === key);
@@ -2640,6 +3010,8 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             fields: fields.filter((f) => !f.hidden),
             configured: hasConfigured,
             values: varValues,
+            ...(selectedProfile ? { profile: selectedProfile } : {}),
+            profiles: await getVarProfileSummaries(plugName),
           },
         });
       },
@@ -2648,23 +3020,39 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       method: "GET",
       pattern: "variables/:plugName",
       auth: "authorize",
-      handler: async ({ params }) => {
+      handler: async ({ params, searchParams }) => {
         const plugName = params["plugName"]!;
         if (!plugNames.has(plugName)) {
           return Response.json({ error: "Plug not found" }, { status: 404 });
         }
+        const selectedProfile = getProfileSelection(
+          plugName,
+          selectionFromSearchParams(searchParams),
+        );
+        const selection = selectedProfile
+          ? { profile: selectedProfile }
+          : undefined;
         const fields = getVarFields(plugName);
-        const hasValues = await hasVars(plugName);
+        const hasValues = await hasVars(plugName, selection);
         let masked: Record<string, string> = {};
-        if (hasValues || Object.keys(getDefaultVars(plugName)).length > 0) {
+        if (
+          hasValues ||
+          Object.keys(getDefaultVars(plugName, selection)).length > 0
+        ) {
           try {
-            const vars = await getVars(plugName);
+            const vars = await getVars(plugName, selection);
             masked = maskVars(plugName, vars);
           } catch {
             masked = {};
           }
         }
-        return Response.json({ fields, values: masked, configured: hasValues });
+        return Response.json({
+          fields,
+          values: masked,
+          configured: hasValues,
+          ...(selectedProfile ? { profile: selectedProfile } : {}),
+          profiles: await getVarProfileSummaries(plugName),
+        });
       },
     },
     {
@@ -3187,7 +3575,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       method: "POST",
       pattern: "debug/:plugName",
       auth: "debug",
-      handler: async ({ params, request }) => {
+      handler: async ({ params, request, searchParams }) => {
         const plugName = params["plugName"]!;
         const plugReg = plugs.find((p) => p.name === plugName);
         if (!plugReg) {
@@ -3200,18 +3588,35 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           body?: unknown;
           params?: Record<string, string>;
           headers?: Record<string, string>;
+          profile?: string;
+          target?: string;
         };
 
         const method = (body.method ?? "GET").toUpperCase();
         const reqPath = body.path ?? "/";
+        const selectedProfile = getProfileSelection(
+          plugName,
+          selectionForProfile(
+            normalizeProfileName(body.profile) ??
+              normalizeProfileName(body.target) ??
+              selectionFromSearchParams(searchParams)?.profile,
+          ),
+        );
+        const selection = selectedProfile
+          ? { profile: selectedProfile }
+          : undefined;
         const start = Date.now();
 
         try {
           const plug = plugReg.plug;
-          const vars = secret ? await getVars(plugName).catch(() => ({})) : {};
+          const vars = secret
+            ? await getVars(plugName, selection).catch(() => ({}))
+            : {};
           const _setVars = secret
-            ? (updates: Record<string, string>) =>
-                setVars(plugName, { ...vars, ...updates })
+            ? async (updates: Record<string, string>) => {
+                Object.assign(vars, updates);
+                await setVars(plugName, { ...vars }, selection);
+              }
             : undefined;
           const opts: {
             params?: Record<string, unknown>;
@@ -3219,9 +3624,16 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             vars?: Record<string, string>;
             body?: unknown;
             _setVars?: (updates: Record<string, string>) => Promise<void>;
+            plugName?: string;
+            profile?: string;
+            target?: string;
             _skipHooks?: boolean;
-          } = { vars };
+          } = { vars, plugName };
           if (_setVars) opts._setVars = _setVars;
+          if (selectedProfile) {
+            opts.profile = selectedProfile;
+            opts.target = selectedProfile;
+          }
           if (body.params) opts.params = body.params;
           if (body.headers) opts.headers = body.headers;
           if (body.body) opts.body = body.body;
@@ -3256,6 +3668,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             body: result,
             timing,
           };
+          if (selectedProfile) {
+            response["profile"] = selectedProfile;
+          }
 
           const allEndpoints:
             | Record<string, { method: string; path: string }>
@@ -3300,15 +3715,22 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       method: "POST",
       pattern: "variables/:plugName",
       auth: "authorize",
-      handler: async ({ params, request }) => {
+      handler: async ({ params, request, searchParams }) => {
         const plugName = params["plugName"]!;
         if (!plugNames.has(plugName)) {
           return Response.json({ error: "Plug not found" }, { status: 404 });
         }
+        const selectedProfile = getProfileSelection(
+          plugName,
+          selectionFromSearchParams(searchParams),
+        );
+        const selection = selectedProfile
+          ? { profile: selectedProfile }
+          : undefined;
         const body = (await request.json()) as Record<string, string>;
         const fields = getVarFields(plugName);
         const merged = {
-          ...(await getVars(plugName).catch(() => ({}))),
+          ...(await getVars(plugName, selection).catch(() => ({}))),
         };
 
         for (const field of fields) {
@@ -3337,8 +3759,11 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         }
 
         try {
-          await setVars(plugName, vars);
-          return Response.json({ ok: true });
+          await setVars(plugName, vars, selection);
+          return Response.json({
+            ok: true,
+            ...(selectedProfile ? { profile: selectedProfile } : {}),
+          });
         } catch (error) {
           const message =
             error instanceof Error ? error.message : "Unknown error";
@@ -3745,12 +4170,19 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       method: "DELETE",
       pattern: "variables/:plugName",
       auth: "authorize",
-      handler: async ({ params }) => {
+      handler: async ({ params, searchParams }) => {
         const plugName = params["plugName"]!;
         if (!plugNames.has(plugName)) {
           return Response.json({ error: "Plug not found" }, { status: 404 });
         }
-        await clearVars(plugName);
+        const selectedProfile = getProfileSelection(
+          plugName,
+          selectionFromSearchParams(searchParams),
+        );
+        await clearVars(
+          plugName,
+          selectedProfile ? { profile: selectedProfile } : undefined,
+        );
         return new Response(null, { status: 204 });
       },
     },

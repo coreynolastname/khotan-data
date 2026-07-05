@@ -94,6 +94,17 @@ export interface BoundPlug {
   ): Promise<T>;
 }
 
+export interface PlugVarSelection {
+  /** Named variable profile to use for this request/run, e.g. "uat" or "live". */
+  profile?: string;
+  /** Alias for `profile`; useful when callers think in deploy targets. */
+  target?: string;
+}
+
+export interface PlugBindingContext extends PlugVarSelection {
+  plugName?: string;
+}
+
 export interface BatchPostOptions<TRecord = unknown> {
   batchSize?: number;
   concurrency?: number;
@@ -111,6 +122,9 @@ export interface BindablePlug {
       signal?: AbortSignal;
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<T>;
   post<T>(
@@ -121,6 +135,9 @@ export interface BindablePlug {
       signal?: AbortSignal;
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<T>;
   batchPost?<TResponse = unknown, TRecord = unknown>(
@@ -129,6 +146,9 @@ export interface BindablePlug {
     options?: BatchPostOptions<TRecord> & {
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<TResponse[]>;
   put<T>(
@@ -139,6 +159,9 @@ export interface BindablePlug {
       signal?: AbortSignal;
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<T>;
   patch<T>(
@@ -149,6 +172,9 @@ export interface BindablePlug {
       signal?: AbortSignal;
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<T>;
   delete<T>(
@@ -159,6 +185,9 @@ export interface BindablePlug {
       signal?: AbortSignal;
       vars?: Record<string, string>;
       _setVars?: (updates: Record<string, string>) => Promise<void>;
+      plugName?: string;
+      profile?: string;
+      target?: string;
     },
   ): Promise<T>;
 }
@@ -256,6 +285,10 @@ export interface FlowRunContext<TBody = unknown> {
   /** The active variant for this run. The variant name is the run mode — flow
    *  code branches on this (e.g. "default", "delta", "full", "healthcheck"). */
   variant: string;
+  /** Active variable profile/target for this plug run, if selected. */
+  profile?: string | undefined;
+  /** Alias for `profile`, preserved for callers that use target terminology. */
+  target?: string | undefined;
   body?: TBody;
   vars: Record<string, string>;
   setVars(updates: Record<string, string>): Promise<void>;
@@ -282,9 +315,20 @@ export interface FlowWorkflowContext<TBody = unknown> {
   /** The active variant for this run. The variant name is the run mode — flow
    *  code branches on this (e.g. "default", "delta", "full", "healthcheck"). */
   variant: string;
+  /** Active variable profile/target for the source plug, if selected. */
+  profile?: string | undefined;
+  /** Alias for `profile`, preserved for callers that use target terminology. */
+  target?: string | undefined;
   body?: TBody;
   vars: Record<string, string>;
   plugVarsByName?: Record<string, Record<string, string>>;
+  /** Selected profile/target per plug name for this workflow run. */
+  plugProfilesByName?: Record<string, string | undefined>;
+  /** Profile-scoped vars keyed by plug name then profile name. */
+  plugVarProfilesByName?: Record<
+    string,
+    Record<string, Record<string, string>>
+  >;
   khotanRunId: string;
   khotanInstanceId: string;
 }
@@ -549,6 +593,14 @@ export interface VarField {
   defaultValue?: string;
 }
 
+export interface PlugVarProfile {
+  label?: string;
+  /** Default/seed values overlaid when this profile is selected. */
+  vars?: Record<string, string>;
+  /** Alias for `vars` for callers that prefer explicit default terminology. */
+  defaults?: Record<string, string>;
+}
+
 export interface PlugRegistration {
   name: string;
   plug: {
@@ -576,6 +628,9 @@ export interface PlugRegistration {
         headers?: Record<string, string>;
         vars?: Record<string, string>;
         _setVars?: (updates: Record<string, string>) => Promise<void>;
+        plugName?: string;
+        profile?: string;
+        target?: string;
         _skipHooks?: boolean;
       },
     ): Promise<T>;
@@ -586,6 +641,9 @@ export interface PlugRegistration {
         headers?: Record<string, string>;
         vars?: Record<string, string>;
         _setVars?: (updates: Record<string, string>) => Promise<void>;
+        plugName?: string;
+        profile?: string;
+        target?: string;
         _skipHooks?: boolean;
       },
     ): Promise<T>;
@@ -596,6 +654,9 @@ export interface PlugRegistration {
         headers?: Record<string, string>;
         vars?: Record<string, string>;
         _setVars?: (updates: Record<string, string>) => Promise<void>;
+        plugName?: string;
+        profile?: string;
+        target?: string;
         _skipHooks?: boolean;
       },
     ): Promise<T>;
@@ -606,6 +667,9 @@ export interface PlugRegistration {
         headers?: Record<string, string>;
         vars?: Record<string, string>;
         _setVars?: (updates: Record<string, string>) => Promise<void>;
+        plugName?: string;
+        profile?: string;
+        target?: string;
         _skipHooks?: boolean;
       },
     ): Promise<T>;
@@ -615,11 +679,22 @@ export interface PlugRegistration {
         headers?: Record<string, string>;
         vars?: Record<string, string>;
         _setVars?: (updates: Record<string, string>) => Promise<void>;
+        plugName?: string;
+        profile?: string;
+        target?: string;
         _skipHooks?: boolean;
       },
     ): Promise<T>;
   };
   vars?: VarField[];
+  /** Named var profiles, e.g. `{ uat: { vars: {...} }, live: {...} }`. */
+  profiles?: Record<string, PlugVarProfile>;
+  /** Alias for `profiles` for teams that use target terminology. */
+  targets?: Record<string, PlugVarProfile>;
+  /** Default profile used when a request/run does not select one explicitly. */
+  defaultProfile?: string;
+  /** Alias for `defaultProfile`. */
+  defaultTarget?: string;
   flows?: FlowRegistration[];
   endpoints?: Record<string, { method: string; path: string }>;
   wires?: WireRegistration[];
@@ -904,6 +979,14 @@ export interface FlowStartOptions<TBody = unknown> {
   variant?: string | undefined;
   /** @deprecated Use `variant`. Accepted as an alias for one minor release. */
   runType?: string;
+  /** Named plug variable profile for this run, e.g. "uat" or "live". */
+  profile?: string;
+  /** Alias for `profile`; when set it also applies to relay destinations. */
+  target?: string;
+  /** Per-plug profile overrides for source/destination plugs. */
+  plugProfiles?: Record<string, string>;
+  /** Alias for `plugProfiles`. */
+  plugTargets?: Record<string, string>;
   body?: TBody;
 }
 
@@ -1029,10 +1112,17 @@ export interface KhotanInstance {
     },
   ): Promise<Record<string, unknown>>;
   deleteMapping(id: string): Promise<void>;
-  getVars(plugName: string): Promise<Record<string, string>>;
-  setVars(plugName: string, vars: Record<string, string>): Promise<void>;
-  clearVars(plugName: string): Promise<void>;
-  hasVars(plugName: string): Promise<boolean>;
+  getVars(
+    plugName: string,
+    options?: PlugVarSelection,
+  ): Promise<Record<string, string>>;
+  setVars(
+    plugName: string,
+    vars: Record<string, string>,
+    options?: PlugVarSelection,
+  ): Promise<void>;
+  clearVars(plugName: string, options?: PlugVarSelection): Promise<void>;
+  hasVars(plugName: string, options?: PlugVarSelection): Promise<boolean>;
   getVarFields(plugName: string): readonly VarField[];
   getPlug(plugName: string): PlugRegistration["plug"];
   /**
@@ -1211,6 +1301,7 @@ export function bindPlugWithVars(
   plug: BindablePlug,
   vars: Record<string, string>,
   setVars?: (updates: Record<string, string>) => Promise<void>,
+  binding: PlugBindingContext = {},
 ): BoundPlug {
   const opts = (extra?: {
     body?: unknown;
@@ -1221,6 +1312,9 @@ export function bindPlugWithVars(
     ...extra,
     vars,
     ...(setVars ? { _setVars: setVars } : {}),
+    ...(binding.plugName ? { plugName: binding.plugName } : {}),
+    ...(binding.profile ? { profile: binding.profile } : {}),
+    ...(binding.target ? { target: binding.target } : {}),
   });
 
   return {
@@ -1253,6 +1347,9 @@ export function bindPlugWithVars(
           ...extra,
           vars,
           ...(setVars ? { _setVars: setVars } : {}),
+          ...(binding.plugName ? { plugName: binding.plugName } : {}),
+          ...(binding.profile ? { profile: binding.profile } : {}),
+          ...(binding.target ? { target: binding.target } : {}),
         });
       }
 
@@ -1332,21 +1429,63 @@ export function bindPlugWithVars(
 export function bindWorkflowPlug(
   plug: BindablePlug,
   ctx: FlowWorkflowContext,
-  plugName = ctx.flow.plugName,
+  plugNameOrOptions: string | PlugBindingContext = ctx.flow.plugName,
+  options: PlugVarSelection = {},
 ): BoundPlug {
-  const vars =
-    plugName === ctx.flow.plugName
-      ? ctx.vars
-      : (ctx.plugVarsByName?.[plugName] ?? {});
+  const binding =
+    typeof plugNameOrOptions === "string"
+      ? { ...options, plugName: plugNameOrOptions }
+      : plugNameOrOptions;
+  const plugName = binding.plugName ?? ctx.flow.plugName;
+  const profile =
+    binding.profile ??
+    binding.target ??
+    ctx.plugProfilesByName?.[plugName] ??
+    (plugName === ctx.flow.plugName ? ctx.profile : undefined);
+  const target = binding.target ?? profile;
 
-  if (plugName !== ctx.flow.plugName) {
+  let vars: Record<string, string>;
+  if (profile) {
+    ctx.plugVarProfilesByName ??= {};
+    ctx.plugVarProfilesByName[plugName] ??= {};
+    vars =
+      ctx.plugVarProfilesByName[plugName][profile] ??
+      (ctx.plugProfilesByName?.[plugName] === profile
+        ? ctx.plugVarsByName?.[plugName]
+        : undefined) ??
+      (plugName === ctx.flow.plugName && ctx.profile === profile
+        ? ctx.vars
+        : undefined) ??
+      {};
+    ctx.plugVarProfilesByName[plugName][profile] = vars;
+  } else {
+    vars =
+      plugName === ctx.flow.plugName
+        ? ctx.vars
+        : (ctx.plugVarsByName?.[plugName] ?? {});
+  }
+
+  if (plugName !== ctx.flow.plugName || profile) {
     ctx.plugVarsByName ??= {};
     ctx.plugVarsByName[plugName] = vars;
   }
+  if (profile) {
+    ctx.plugProfilesByName ??= {};
+    ctx.plugProfilesByName[plugName] = profile;
+  }
 
-  return bindPlugWithVars(plug, vars, async (updates) => {
-    Object.assign(vars, updates);
-  });
+  return bindPlugWithVars(
+    plug,
+    vars,
+    async (updates) => {
+      Object.assign(vars, updates);
+    },
+    {
+      plugName,
+      ...(profile ? { profile } : {}),
+      ...(target ? { target } : {}),
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

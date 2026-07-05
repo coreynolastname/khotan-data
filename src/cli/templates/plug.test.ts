@@ -15,6 +15,7 @@ import {
   linkPagination,
   offsetPagination,
   plug,
+  tokenCacheStore,
   tokenExchange,
 } from "./plug.js";
 
@@ -188,6 +189,164 @@ describe("auth strategies", () => {
       retry: false,
     });
     expect(w.authType).toBe("tokenExchange");
+  });
+
+  it("tokenExchange — scopes token requests and stores by vars plus request profile", async () => {
+    const durableTokens = new Map<string, { accessToken: string }>();
+    const buildTokenRequest = vi.fn((vars, context) => ({
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: vars["clientId"]!,
+        client_secret: vars["clientSecret"]!,
+        org_id: vars["orgId"]!,
+        profile: context.profile ?? "",
+        request_path: new URL(context.url).pathname,
+      }),
+    }));
+
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url) === `${BASE}/oauth/token`) {
+        const body = init?.body as URLSearchParams;
+        return jsonResponse({
+          access_token: `${body.get("profile")}:${body.get("org_id")}`,
+          expires_in: 3600,
+        });
+      }
+
+      const headers = init?.headers as Headers;
+      return jsonResponse({
+        ok: true,
+        authorization: headers.get("Authorization"),
+      });
+    });
+
+    const w = plug({
+      name: "fresh",
+      baseUrl: BASE,
+      retry: false,
+      auth: tokenExchange({
+        getVariables: () => ({
+          clientId: "env-client",
+          clientSecret: "env-secret",
+        }),
+        tokenEndpoint: "/oauth/token",
+        cacheKey: (vars, context) =>
+          `${context.plugName}:${context.profile}:${vars["orgId"]}`,
+        buildTokenRequest,
+        parseTokenResponse: (data) => {
+          const value = data as { access_token: string; expires_in: number };
+          return {
+            accessToken: value.access_token,
+            expiresIn: value.expires_in,
+          };
+        },
+        tokenStore: {
+          get: (key) => durableTokens.get(key ?? "") ?? null,
+          set: (token, key) => {
+            durableTokens.set(key ?? "", token);
+          },
+        },
+      }),
+    });
+
+    const first = await w.get<{ authorization: string }>("/items", {
+      vars: { orgId: "org-uat" },
+      profile: "uat",
+    });
+    const second = await w.get<{ authorization: string }>("/items", {
+      vars: { orgId: "org-live" },
+      profile: "live",
+    });
+
+    expect(first.authorization).toBe("Bearer uat:org-uat");
+    expect(second.authorization).toBe("Bearer live:org-live");
+    expect(buildTokenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientId: "env-client",
+        clientSecret: "env-secret",
+        orgId: "org-uat",
+      }),
+      expect.objectContaining({
+        plugName: "fresh",
+        profile: "uat",
+        target: "uat",
+        method: "GET",
+        url: `${BASE}/items`,
+        cacheKey: "fresh:uat:org-uat",
+      }),
+    );
+    expect([...durableTokens.keys()].sort()).toEqual([
+      "fresh:live:org-live",
+      "fresh:uat:org-uat",
+    ]);
+  });
+
+  it("tokenExchange — reloads keyed tokens from a durable tokenStore", async () => {
+    const durableTokens = new Map([
+      ["fresh:uat:org-1", { accessToken: "stored-token" }],
+    ]);
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true }));
+
+    const w = plug({
+      name: "fresh",
+      baseUrl: BASE,
+      retry: false,
+      auth: tokenExchange({
+        tokenEndpoint: "/oauth/token",
+        cacheKey: (vars, context) =>
+          `${context.plugName}:${context.profile}:${vars["orgId"]}`,
+        buildTokenRequest: () => {
+          throw new Error("token endpoint should not be called");
+        },
+        parseTokenResponse: () => ({ accessToken: "unused" }),
+        tokenStore: {
+          get: (key) => durableTokens.get(key ?? "") ?? null,
+          set: (token, key) => {
+            durableTokens.set(key ?? "", token);
+          },
+        },
+      }),
+    });
+
+    await w.get("/items", { vars: { orgId: "org-1" }, profile: "uat" });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      `${BASE}/items`,
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    );
+    const headers = vi.mocked(fetch).mock.calls[0]![1]!.headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer stored-token");
+  });
+
+  it("tokenCacheStore — adapts a Khotan cache to a tokenStore", async () => {
+    const values = new Map<string, unknown>();
+    const cache = {
+      get: vi.fn(async (key: string) => values.get(key) ?? null),
+      set: vi.fn(async (key: string, value: unknown) => {
+        values.set(key, value);
+        return value;
+      }),
+      delete: vi.fn(async (key: string) => {
+        values.delete(key);
+      }),
+    };
+    const store = tokenCacheStore(cache, { prefix: "oauth:" });
+
+    await store.set({ accessToken: "token-1" }, "fresh:uat");
+    await expect(store.get("fresh:uat")).resolves.toEqual({
+      accessToken: "token-1",
+    });
+    await store.clear?.("fresh:uat");
+
+    expect(cache.set).toHaveBeenCalledWith("oauth:fresh:uat", {
+      accessToken: "token-1",
+    });
+    expect(cache.delete).toHaveBeenCalledWith("oauth:fresh:uat");
+    await expect(store.get("fresh:uat")).resolves.toBeNull();
   });
 });
 

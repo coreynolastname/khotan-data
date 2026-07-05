@@ -15,6 +15,7 @@ interface VariablesResponse {
   }[];
   values: Record<string, string>;
   configured: boolean;
+  profile?: string;
 }
 
 /**
@@ -47,6 +48,8 @@ export const varsCommand = new Command("vars")
   .option("--base-path <path>", "API base path", "/api/khotan")
   .option("--list", "List all plugs and their variable state")
   .option("--json <json>", "Variable payload for set (JSON object)")
+  .option("--profile <profile>", "Named variable profile to read/write")
+  .option("--target <target>", "Alias for --profile")
   .option(
     "--show-secrets",
     "Show secret values in plaintext (redacted by default)",
@@ -60,6 +63,8 @@ export const varsCommand = new Command("vars")
         basePath: string;
         list?: boolean;
         json?: string;
+        profile?: string;
+        target?: string;
         showSecrets?: boolean;
       },
       command: Command,
@@ -71,6 +76,13 @@ export const varsCommand = new Command("vars")
       const port = resolvePort(portFlag);
       const baseUrl = `http://localhost:${String(port)}${opts.basePath}`;
       const showSecrets = opts.showSecrets ?? false;
+      const selectedProfile = opts.profile ?? opts.target;
+
+      function variablesUrl(name: string): string {
+        const url = new URL(`${baseUrl}/variables/${name}`);
+        if (selectedProfile) url.searchParams.set("profile", selectedProfile);
+        return url.toString();
+      }
 
       await checkConnectivity(baseUrl);
 
@@ -79,10 +91,11 @@ export const varsCommand = new Command("vars")
         const plugs = (await plugsRes.json()) as { name: string }[];
         const variables = await Promise.all(
           plugs.map(async (plug) => {
-            const res = await cliFetch(`${baseUrl}/variables/${plug.name}`);
+            const res = await cliFetch(variablesUrl(plug.name));
             if (res.status === 404) {
               return {
                 plugName: plug.name,
+                ...(selectedProfile ? { profile: selectedProfile } : {}),
                 configured: false,
                 fields: [],
                 values: {},
@@ -91,6 +104,7 @@ export const varsCommand = new Command("vars")
             const data = (await res.json()) as VariablesResponse;
             return {
               plugName: plug.name,
+              ...(data.profile ? { profile: data.profile } : {}),
               configured: data.configured,
               fields: data.fields,
               values: redactSecrets(data.fields, data.values, showSecrets),
@@ -111,7 +125,7 @@ export const varsCommand = new Command("vars")
       const resolvedAction = action ?? "show";
 
       if (resolvedAction === "show") {
-        const res = await cliFetch(`${baseUrl}/variables/${plugName}`);
+        const res = await cliFetch(variablesUrl(plugName));
         if (res.status === 404) {
           fail("plug_not_found", `Plug "${plugName}" not found.`);
         }
@@ -119,6 +133,7 @@ export const varsCommand = new Command("vars")
         output({
           ok: true,
           plugName,
+          ...(data.profile ? { profile: data.profile } : {}),
           configured: data.configured,
           fields: data.fields,
           values: redactSecrets(data.fields, data.values, showSecrets),
@@ -141,7 +156,7 @@ export const varsCommand = new Command("vars")
           fail("invalid_json", "Could not parse --json as JSON.");
         }
 
-        const res = await cliFetch(`${baseUrl}/variables/${plugName}`, {
+        const res = await cliFetch(variablesUrl(plugName), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -153,12 +168,17 @@ export const varsCommand = new Command("vars")
             data.error ?? `Failed to set variables for "${plugName}"`,
           );
         }
-        output({ ok: true, action: "set", plugName });
+        output({
+          ok: true,
+          action: "set",
+          plugName,
+          ...(selectedProfile ? { profile: selectedProfile } : {}),
+        });
         return;
       }
 
       if (resolvedAction === "clear") {
-        const res = await cliFetch(`${baseUrl}/variables/${plugName}`, {
+        const res = await cliFetch(variablesUrl(plugName), {
           method: "DELETE",
         });
         if (!res.ok && res.status !== 204) {
@@ -170,7 +190,12 @@ export const varsCommand = new Command("vars")
             data.error ?? `Failed to clear variables for "${plugName}"`,
           );
         }
-        output({ ok: true, action: "clear", plugName });
+        output({
+          ok: true,
+          action: "clear",
+          plugName,
+          ...(selectedProfile ? { profile: selectedProfile } : {}),
+        });
         return;
       }
 

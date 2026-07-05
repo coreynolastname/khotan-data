@@ -49,6 +49,9 @@ const khotanData = khotan({
     // {
     //   name: "stripe",
     //   plug: stripePlug,
+    //   // Optional UAT/live or tenant-specific var defaults:
+    //   // profiles: { uat: { vars: { baseUrl: "https://uat.example" } }, live: { vars: { baseUrl: "https://api.example" } } },
+    //   // defaultProfile: "live",
     //   flows: [stripeProductsInflow],
     // },
   ],
@@ -70,6 +73,7 @@ export default khotanData;
 //   import khotanData from "@/lib/khotan/khotan";
 //   await khotanData.flow("products-inflow", { plugName: "stripe" }).start({
 //     variant: "delta", // the variant (run mode); defaults to "default"
+//     target: "uat", // optional var profile/target; alias of `profile`
 //   });
 //
 // `flow(name).start(options)` is the single entry point — there is no
