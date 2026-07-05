@@ -36,11 +36,19 @@ function hasSrcLayout(cwd: string): boolean {
 interface CronConfigResult {
   status: "created" | "updated" | "skipped" | "unsupported";
   path: string;
+  schedule: string | null;
+  recommendedSchedule: string;
 }
+
+const KHOTAN_CRON_PATH = "/api/khotan/cron";
+const KHOTAN_CRON_SCHEDULE = "* * * * *";
 
 function ensureCronVercelConfig(cwd: string): CronConfigResult {
   const configPath = path.join(cwd, "vercel.json");
-  const cronEntry = { path: "/api/khotan/cron", schedule: "* * * * *" };
+  const cronEntry = {
+    path: KHOTAN_CRON_PATH,
+    schedule: KHOTAN_CRON_SCHEDULE,
+  };
 
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(
@@ -48,41 +56,73 @@ function ensureCronVercelConfig(cwd: string): CronConfigResult {
       `${JSON.stringify({ crons: [cronEntry] }, null, 2)}\n`,
       "utf-8",
     );
-    return { status: "created", path: configPath };
+    return {
+      status: "created",
+      path: configPath,
+      schedule: cronEntry.schedule,
+      recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+    };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
   } catch {
-    return { status: "unsupported", path: configPath };
+    return {
+      status: "unsupported",
+      path: configPath,
+      schedule: null,
+      recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+    };
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { status: "unsupported", path: configPath };
+    return {
+      status: "unsupported",
+      path: configPath,
+      schedule: null,
+      recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+    };
   }
 
   const config = parsed as Record<string, unknown>;
   if (config["crons"] !== undefined && !Array.isArray(config["crons"])) {
-    return { status: "unsupported", path: configPath };
+    return {
+      status: "unsupported",
+      path: configPath,
+      schedule: null,
+      recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+    };
   }
 
   const crons = (config["crons"] as unknown[] | undefined) ?? [];
-  if (
-    crons.some(
-      (entry) =>
-        Boolean(entry) &&
-        typeof entry === "object" &&
-        !Array.isArray(entry) &&
-        (entry as Record<string, unknown>)["path"] === cronEntry.path,
-    )
-  ) {
-    return { status: "skipped", path: configPath };
+  const existingCron = crons.find(
+    (entry) =>
+      Boolean(entry) &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>)["path"] === cronEntry.path,
+  );
+  if (existingCron && typeof existingCron === "object") {
+    const existingSchedule = (existingCron as Record<string, unknown>)[
+      "schedule"
+    ];
+    return {
+      status: "skipped",
+      path: configPath,
+      schedule: typeof existingSchedule === "string" ? existingSchedule : null,
+      recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+    };
   }
 
   config["crons"] = [...crons, cronEntry];
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
-  return { status: "updated", path: configPath };
+  return {
+    status: "updated",
+    path: configPath,
+    schedule: cronEntry.schedule,
+    recommendedSchedule: KHOTAN_CRON_SCHEDULE,
+  };
 }
 
 function resolveOutputBase(
@@ -398,6 +438,17 @@ export const addCommand = new Command("add")
           console.warn(
             `⚠ Could not automatically update ${relPath}. Add {"path": "/api/khotan/cron", "schedule": "* * * * *"} to its crons array.`,
           );
+        }
+        if (cronConfig.status !== "unsupported") {
+          if (cronConfig.schedule !== cronConfig.recommendedSchedule) {
+            console.warn(
+              `⚠ Existing /api/khotan/cron schedule "${cronConfig.schedule ?? "unknown"}" may delay minute-level flow schedules. Run the dispatcher at least as often as the smallest flow/variant schedule granularity.`,
+            );
+          } else {
+            console.log(
+              `  Dispatcher cron uses ${cronConfig.recommendedSchedule} so minute-level flow/variant schedules are checked each minute.`,
+            );
+          }
         }
         console.log(
           "  Set CRON_SECRET in production so /api/khotan/cron is protected.",

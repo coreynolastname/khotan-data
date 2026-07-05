@@ -100,6 +100,19 @@ describe("skill templates (static validation)", () => {
     const names = entries.map((e) => e.skillName);
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it("khotan-flow warns about dispatcher cadence for minute-level schedules", () => {
+    const entry = entries.find(
+      (candidate) => candidate.registryName === "skill-flow",
+    );
+    expect(entry).toBeDefined();
+    const content = fs.readFileSync(entry!.templatePath, "utf-8");
+    expect(content).toContain(
+      '{ "crons": [{ "path": "/api/khotan/cron", "schedule": "* * * * *" }] }',
+    );
+    expect(content).toContain("smallest flow/variant schedule granularity");
+    expect(content).toContain("hourly dispatcher");
+  });
 });
 
 describe("init SKILL_COMPONENTS consistency", () => {

@@ -435,11 +435,38 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     );
   }
 
+  function serializeFlowVariants(
+    variants: Record<string, FlowVariant>,
+  ): Record<string, { schedule?: string }> {
+    const serialized: Record<string, { schedule?: string }> = {};
+    for (const [variantName, variantConfig] of Object.entries(variants)) {
+      serialized[variantName] =
+        typeof variantConfig.schedule === "string"
+          ? { schedule: variantConfig.schedule }
+          : {};
+    }
+    return serialized;
+  }
+
+  function getEffectiveDefaultSchedule(
+    flow: Record<string, unknown>,
+    variants: Record<string, FlowVariant>,
+  ): string | null {
+    const defaultSchedule = variants[DEFAULT_VARIANT]?.schedule;
+    if (typeof defaultSchedule === "string") return defaultSchedule;
+    return typeof flow["schedule"] === "string" ? flow["schedule"] : null;
+  }
+
   function enrichRegisteredFlowRecord(
     flow: Record<string, unknown>,
     plugRows: Record<string, unknown>[],
   ): Record<string, unknown> {
     const flowConfig = getRegisteredFlowConfig(flow);
+    const variants =
+      flowConfig && typeof flow["plugName"] === "string"
+        ? getFlowVariants(flow["plugName"], flowConfig.name, flowConfig.type)
+        : { [DEFAULT_VARIANT]: {} };
+    const effectiveSchedule = getEffectiveDefaultSchedule(flow, variants);
     const to = flowConfig?.to ?? null;
     const destinationPlug =
       typeof to === "string"
@@ -448,6 +475,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
     return {
       ...flow,
+      schedule: effectiveSchedule,
+      effectiveSchedule,
+      variants: serializeFlowVariants(variants),
       to,
       destinationPlugId: destinationPlug?.["id"] ?? null,
       destinationPlugName: destinationPlug?.["name"] ?? to,
