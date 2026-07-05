@@ -2092,7 +2092,11 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       const workflowStatus = workflowRun.status
         ? await workflowRun.status
         : null;
-      return { ...run, workflowStatus };
+      const reconciledRun = await reconcileRunWithWorkflowTerminalStatus(
+        run,
+        workflowStatus,
+      );
+      return { ...reconciledRun, workflowStatus };
     } catch (error) {
       return {
         ...run,
@@ -2131,6 +2135,17 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       : null;
   }
 
+  function coerceWorkflowTerminalStatus(
+    value: unknown,
+  ): Extract<
+    KhotanTerminalRunStatus,
+    "completed" | "failed" | "cancelled"
+  > | null {
+    return value === "completed" || value === "failed" || value === "cancelled"
+      ? value
+      : null;
+  }
+
   const NON_TERMINAL_RUN_STATUSES: ("pending" | "running")[] = [
     "pending",
     "running",
@@ -2140,6 +2155,26 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     status: KhotanRunStatus | null,
   ): status is "pending" | "running" {
     return status === "pending" || status === "running";
+  }
+
+  function getRunVariant(run: Record<string, unknown>): string {
+    return typeof run["variant"] === "string"
+      ? run["variant"]
+      : DEFAULT_VARIANT;
+  }
+
+  function getRunStartedAt(run: Record<string, unknown>): Date | null {
+    return coerceDate(run["startedAt"]);
+  }
+
+  function getRunDurationMs(
+    run: Record<string, unknown>,
+    completedAt: Date,
+  ): number | null {
+    const startedAt = getRunStartedAt(run);
+    return startedAt
+      ? Math.max(completedAt.getTime() - startedAt.getTime(), 0)
+      : null;
   }
 
   async function claimTerminalRun(
@@ -2164,6 +2199,120 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
     await adapter.updateRun(runId, updates);
     return true;
+  }
+
+  async function reconcileRunWithWorkflowTerminalStatus(
+    run: Record<string, unknown>,
+    workflowStatus: unknown,
+  ): Promise<Record<string, unknown>> {
+    const terminalStatus = coerceWorkflowTerminalStatus(workflowStatus);
+    const currentStatus = coerceRunStatus(run["status"]);
+    if (!terminalStatus || !isNonTerminalRunStatus(currentStatus)) {
+      return run;
+    }
+
+    const runId = getRunId(run);
+    if (!runId) return run;
+
+    const completedAt = new Date();
+    const durationMs = getRunDurationMs(run, completedAt);
+    const counters = getRunCountersFromRecord(run);
+    const failed =
+      terminalStatus === "failed" ? Math.max(counters.failed, 1) : undefined;
+    const existingError =
+      typeof run["error"] === "string" ? run["error"] : null;
+    const error =
+      terminalStatus === "completed"
+        ? null
+        : (existingError ??
+          `Workflow reported ${terminalStatus} before khotan observed completion`);
+
+    const updates: KhotanTerminalRunUpdate = {
+      status: terminalStatus,
+      completedAt,
+      error,
+    };
+    if (durationMs !== null) updates.durationMs = durationMs;
+    if (failed !== undefined) updates.failed = failed;
+
+    const transitioned = await claimTerminalRun(runId, updates);
+    if (!transitioned) {
+      return (await adapter.getRun(runId)) ?? run;
+    }
+
+    const flowId = getRunFlowId(run);
+    if (flowId) {
+      await adapter.updateFlowLastRun(flowId, {
+        lastRunAt: completedAt,
+        lastRunStatus: terminalStatus,
+      });
+    }
+
+    await emitFactoryFlowHook(await getFlowHookContextForRun(run), {
+      id: runId,
+      status: terminalStatus,
+      variant: getRunVariant(run),
+      source: coerceRunSource(run["source"]),
+      durationMs: durationMs ?? 0,
+      ...counters,
+      ...(failed !== undefined ? { failed } : {}),
+      error,
+    });
+
+    return {
+      ...run,
+      ...updates,
+    };
+  }
+
+  async function reconcileRunRowsWithWorkflowStatus(
+    rows: Record<string, unknown>[],
+  ): Promise<Record<string, unknown>[]> {
+    if (
+      !rows.some(
+        (run) =>
+          isNonTerminalRunStatus(coerceRunStatus(run["status"])) &&
+          !!getRunWorkflowId(run),
+      )
+    ) {
+      return rows;
+    }
+
+    let getRun: Awaited<ReturnType<typeof importWorkflowGetRun>>;
+    try {
+      getRun = await importWorkflowGetRun();
+    } catch {
+      return rows;
+    }
+
+    return Promise.all(
+      rows.map(async (run) => {
+        if (
+          !isNonTerminalRunStatus(coerceRunStatus(run["status"])) ||
+          !getRunWorkflowId(run)
+        ) {
+          return run;
+        }
+
+        try {
+          const workflowRun = getRun(getRunWorkflowId(run)!);
+          const workflowStatus = workflowRun.status
+            ? await workflowRun.status
+            : null;
+          const reconciledRun = await reconcileRunWithWorkflowTerminalStatus(
+            run,
+            workflowStatus,
+          );
+          return { ...reconciledRun, workflowStatus };
+        } catch (error) {
+          return {
+            ...run,
+            workflowStatus: null,
+            workflowError: getErrorMessage(error),
+          };
+        }
+      }),
+    );
   }
 
   function isStuckCandidate(
@@ -2821,7 +2970,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       auth: "authorize",
       handler: async ({ params }) => {
         const flowId = params["flowId"]!;
-        const data = await adapter.listRuns(flowId);
+        const data = await reconcileRunRowsWithWorkflowStatus(
+          await adapter.listRuns(flowId),
+        );
         return Response.json(data);
       },
     },
@@ -2842,8 +2993,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           0,
         );
         const page = await adapter.listRunsPage({ limit, offset });
+        const items = await reconcileRunRowsWithWorkflowStatus(page.items);
         return Response.json({
-          items: page.items,
+          items,
           page: {
             limit,
             offset,
