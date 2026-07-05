@@ -48,6 +48,15 @@ npx khotan-data add schema --force   # Overwrite existing files without promptin
 npx khotan-data add hub --yes        # Non-interactive mode: auto-accept all prompts
 npx khotan-data generate --force     # Regenerate schema (prompts before overwriting by default)
 
+# Monorepo/shared DB package schema output
+npx khotan-data generate \
+  --shared-db \
+  --schema-output packages/databases/pipeline/src/khotan.ts \
+  --schema-barrel packages/databases/pipeline/src/index.ts \
+  --drizzle-config packages/databases/pipeline/drizzle.config.ts \
+  --migrations-output packages/databases/pipeline/migrations \
+  --db-package @acme/pipeline-db
+
 # Ops guardrails
 npx khotan-data --env-file .env.customer whoami --assert-org org_123
 npx khotan-data databases bind primary neon/project/db --url-env DATABASE_URL
@@ -60,6 +69,14 @@ an explicit `--env-file`, then fails fast when `--assert-org` does not match.
 Database and app env commands write `khotan.bindings.json` only; they do not
 call provider APIs or synthesize database URLs. Use the recorded `databaseId`
 with your platform-specific deployment tooling.
+
+For monorepos where Drizzle schema and migrations live in a shared database
+package, use `generate --shared-db` with explicit package paths. The command
+writes the Khotan table schema to the shared package, creates or updates that
+package's `drizzle.config.ts`, updates the schema barrel re-export, and prints
+runtime checks for importing `db` from the workspace package while keeping
+`drizzleAdapter` from `khotan-data/factory`. See
+[Shared DB Packages](docs/SHARED-DB-PACKAGES.md).
 
 ## Factory (Runtime Engine)
 
