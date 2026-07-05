@@ -556,6 +556,9 @@ import { inflow, outflow, relay, catchEvent, wire } from "khotan-data/factory";
 npm install
 npm run dev          # watch mode build
 npm run test         # run tests
+npm run test:integration # run integration tests
+npm run e2e          # pack tarball + typecheck generated Next.js consumers
+npm run playground   # pack/install into examples/playground and start Next.js
 npm run test:watch   # watch mode tests
 npm run check        # typecheck + lint + format + test
 npm run build        # production build
