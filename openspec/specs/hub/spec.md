@@ -35,6 +35,11 @@ The scaffolded `hub.tsx` SHALL be a React client component that displays configu
 - **WHEN** a user views a plug in the Hub
 - **THEN** the Hub SHALL show the plug's associated flows with their name, type, schedule, last run status, and enabled state
 
+#### Scenario: Display persisted run updates
+- **WHEN** a user opens a completed run with persisted `sendUpdate()` history
+- **THEN** the Hub SHALL fetch `GET /api/khotan/runs/:id/stream`
+- **AND** it SHALL render replayed update messages with metadata and counters for debugging
+
 #### Scenario: Display empty state
 - **WHEN** no plugs are registered
 - **THEN** the Hub SHALL display a helpful empty state message explaining how to register plugs in the khotan config file

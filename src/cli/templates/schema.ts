@@ -16,6 +16,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -279,6 +280,41 @@ export const khotanRuns = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// khotan_run_updates — persisted sendUpdate() history for run debugging
+// ---------------------------------------------------------------------------
+
+export const khotanRunUpdates = pgTable(
+  "khotan_run_updates",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => khotanRuns.id),
+    index: integer("index").notNull(),
+    timestamp: timestamp("timestamp", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    namespace: text("namespace"),
+    type: text("type", {
+      enum: ["progress", "log", "metric", "error"],
+    }).notNull(),
+    message: text("message").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    counters: jsonb("counters").$type<Record<string, number>>(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.runId, table.index],
+      name: "khotan_run_updates_run_id_index_pk",
+    }),
+    index("khotan_run_updates_run_id_idx").on(table.runId),
+    index("khotan_run_updates_run_id_timestamp_idx").on(
+      table.runId,
+      table.timestamp,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // khotan_mappings — one row per entity instance within a resource
 // ---------------------------------------------------------------------------
 
@@ -429,7 +465,18 @@ export const khotanRunsRelations = relations(khotanRuns, ({ one, many }) => ({
     references: [khotanWebhookHandlers.id],
   }),
   webhookEvents: many(khotanWebhookEvents),
+  updates: many(khotanRunUpdates),
 }));
+
+export const khotanRunUpdatesRelations = relations(
+  khotanRunUpdates,
+  ({ one }) => ({
+    run: one(khotanRuns, {
+      fields: [khotanRunUpdates.runId],
+      references: [khotanRuns.id],
+    }),
+  }),
+);
 
 export const khotanWebhookEventsRelations = relations(
   khotanWebhookEvents,
@@ -499,6 +546,9 @@ export type NewKhotanWebhookEvent = typeof khotanWebhookEvents.$inferInsert;
 
 export type KhotanRun = typeof khotanRuns.$inferSelect;
 export type NewKhotanRun = typeof khotanRuns.$inferInsert;
+
+export type KhotanRunUpdate = typeof khotanRunUpdates.$inferSelect;
+export type NewKhotanRunUpdate = typeof khotanRunUpdates.$inferInsert;
 
 export type KhotanResource = typeof khotanResources.$inferSelect;
 export type NewKhotanResource = typeof khotanResources.$inferInsert;

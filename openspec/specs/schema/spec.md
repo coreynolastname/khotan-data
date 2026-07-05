@@ -50,6 +50,18 @@ The schema SHALL define a `khotan_runs` Drizzle table with the following columns
 - **WHEN** a row is inserted with only required fields
 - **THEN** `extracted`, `transformed`, `created`, `updated`, `deleted`, and `failed` SHALL all default to 0
 
+### Requirement: khotan_run_updates table
+The schema SHALL define a `khotan_run_updates` Drizzle table for persisted `sendUpdate()` history with `run_id`, `index`, `timestamp`, `namespace`, `type`, `message`, `metadata`, and `counters` columns.
+
+#### Scenario: Run updates are ordered per run
+- **WHEN** multiple updates are persisted for a run
+- **THEN** each update SHALL have a monotonically increasing `index` scoped to that `run_id`
+- **AND** `(run_id, index)` SHALL uniquely identify an update
+
+#### Scenario: Run updates retain debugging payloads
+- **WHEN** application code emits a run update with metadata and counters
+- **THEN** the schema SHALL store `metadata` as JSONB and `counters` as JSONB so completed-run debugging can replay the emitted details
+
 ### Requirement: Schema exports Drizzle relations
 The schema file SHALL export Drizzle `relations` definitions for all tables so that relational queries work (e.g., querying a plug with its flows and runs, querying a wire with its runs, a resource with its flows and mappings).
 

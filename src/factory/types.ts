@@ -299,7 +299,22 @@ export interface KhotanRunUpdate {
   updated?: number;
   deleted?: number;
   failed?: number;
+  skipped?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface KhotanPersistedRunUpdateInput {
+  runId: string;
+  timestamp: Date;
+  namespace?: string | null;
+  type: NonNullable<KhotanRunUpdate["type"]>;
+  message: string;
+  metadata?: Record<string, unknown> | null;
+  counters?: Record<string, number> | null;
+}
+
+export interface KhotanPersistedRunUpdate extends KhotanPersistedRunUpdateInput {
+  index: number;
 }
 
 export interface FlowRegistration<TBody = unknown> {
@@ -526,10 +541,14 @@ export interface PassWorkflowContext {
 
 export interface KhotanWorkflowContextRef {
   khotanInstanceId: string;
+  khotanRunId?: string;
 }
 
 export interface KhotanWorkflowRuntimeHelpers {
   cache(cacheName: string): CacheInstance;
+  appendRunUpdate(update: KhotanPersistedRunUpdateInput): Promise<{
+    index: number | null;
+  }>;
   mapping(resourceName: string): MappingInstance;
   listMappings: KhotanInstance["listMappings"];
   lookupMapping: KhotanInstance["lookupMapping"];
@@ -651,6 +670,15 @@ export interface KhotanAdapter {
     limit: number;
     offset: number;
   }): Promise<{ items: Record<string, unknown>[]; hasMore: boolean }>;
+  appendRunUpdate?(
+    update: KhotanPersistedRunUpdateInput,
+  ): Promise<{ index: number }>;
+  listRunUpdates?(params: {
+    runId: string;
+    startIndex?: number;
+    namespace?: string;
+    limit?: number;
+  }): Promise<KhotanPersistedRunUpdate[]>;
   listStuckRuns?(params: {
     flowId?: string | null;
     olderThan: Date;
@@ -1386,6 +1414,20 @@ export function khotanCache(
   cacheName: string,
 ): CacheInstance {
   return getWorkflowRuntimeHelpers(ctx).cache(cacheName);
+}
+
+export function khotanRunUpdates(ctx: KhotanWorkflowContextRef) {
+  return {
+    append(update: Omit<KhotanPersistedRunUpdateInput, "runId">) {
+      if (!ctx.khotanRunId) {
+        throw new Error("Khotan workflow context does not include khotanRunId");
+      }
+      return getWorkflowRuntimeHelpers(ctx).appendRunUpdate({
+        ...update,
+        runId: ctx.khotanRunId,
+      });
+    },
+  };
 }
 
 export function khotanMappings(ctx: KhotanWorkflowContextRef) {

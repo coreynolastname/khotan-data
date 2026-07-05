@@ -4,6 +4,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -227,6 +228,35 @@ export const khotanRuns = pgTable(
   ],
 );
 
+export const khotanRunUpdates = pgTable(
+  "khotan_run_updates",
+  {
+    runId: text("run_id").notNull(),
+    index: integer("index").notNull(),
+    timestamp: timestamp("timestamp", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    namespace: text("namespace"),
+    type: text("type", {
+      enum: ["progress", "log", "metric", "error"],
+    }).notNull(),
+    message: text("message").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    counters: jsonb("counters").$type<Record<string, number>>(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.runId, table.index],
+      name: "khotan_run_updates_run_id_index_pk",
+    }),
+    index("khotan_run_updates_run_id_idx").on(table.runId),
+    index("khotan_run_updates_run_id_timestamp_idx").on(
+      table.runId,
+      table.timestamp,
+    ),
+  ],
+);
+
 export const khotanMappingsTable = pgTable(
   "khotan_mappings",
   {
@@ -312,6 +342,7 @@ export type WireRow = InferSelectModel<typeof khotanWires>;
 export type WebhookHandlerRow = InferSelectModel<typeof khotanWebhookHandlers>;
 export type WebhookEventRow = InferSelectModel<typeof khotanWebhookEvents>;
 export type RunRow = InferSelectModel<typeof khotanRuns>;
+export type RunUpdateRow = InferSelectModel<typeof khotanRunUpdates>;
 export type MappingRow = InferSelectModel<typeof khotanMappingsTable>;
 export type CacheRow = InferSelectModel<typeof khotanCaches>;
 export type CacheEntryRow = InferSelectModel<typeof khotanCacheEntries>;

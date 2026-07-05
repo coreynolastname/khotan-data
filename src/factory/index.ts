@@ -30,6 +30,8 @@ export type {
   InflowWorkflow,
   OutflowWorkflow,
   RelayWorkflow,
+  KhotanPersistedRunUpdate,
+  KhotanPersistedRunUpdateInput,
   InflowConfig,
   OutflowConfig,
   RelayConfig,
@@ -92,6 +94,7 @@ export {
   wire,
   bindWorkflowPlug,
   khotanCache,
+  khotanRunUpdates,
   khotanMappings,
 } from "./types.js";
 export type { NextJsRequest, NextJsRouteHandlers } from "./runtime.js";
@@ -114,6 +117,7 @@ export type {
   WorkflowGetRunFn,
   WorkflowGetWritableFn,
   WorkflowRuntimeConfig,
+  SendUpdateOptions,
   WorkflowStartFn,
 } from "./workflow.js";
 

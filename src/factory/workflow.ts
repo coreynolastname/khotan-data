@@ -1,4 +1,10 @@
-import type { KhotanRunUpdate } from "./types.js";
+import { khotanRuntimeRegistry } from "./types.js";
+import type {
+  KhotanPersistedRunUpdateInput,
+  KhotanRunUpdate,
+  KhotanWorkflowContextRef,
+  KhotanWorkflowRuntimeHelpers,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Workflow integration — dynamic import of workflow/api
@@ -51,6 +57,26 @@ export class KhotanWorkflowStartError extends Error {
     this.name = "KhotanWorkflowStartError";
   }
 }
+
+type SendUpdateValue = KhotanRunUpdate | string;
+
+export interface SendUpdateOptions {
+  namespace?: string;
+  ctx?: KhotanWorkflowContextRef;
+  runId?: string;
+  khotanInstanceId?: string;
+}
+
+const COUNTER_KEYS = [
+  "progress",
+  "extracted",
+  "transformed",
+  "created",
+  "updated",
+  "deleted",
+  "failed",
+  "skipped",
+] as const;
 
 let _workflowStart: WorkflowStartFn | null = null;
 let _workflowGetRun: WorkflowGetRunFn | null = null;
@@ -152,23 +178,108 @@ async function importWorkflowGetWritable(): Promise<WorkflowGetWritableFn> {
   }
 }
 
-export async function sendUpdate(
-  update: KhotanRunUpdate | string,
-  options: { namespace?: string } = {},
-): Promise<void> {
+function isWorkflowRunContext(
+  value: unknown,
+): value is KhotanWorkflowContextRef & { khotanRunId: string } {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>)["khotanInstanceId"] ===
+      "string" &&
+    typeof (value as Record<string, unknown>)["khotanRunId"] === "string"
+  );
+}
+
+function getRuntimeHelpers(
+  ctx: KhotanWorkflowContextRef,
+): KhotanWorkflowRuntimeHelpers {
+  const helpers = khotanRuntimeRegistry.get(ctx.khotanInstanceId);
+  if (helpers) return helpers;
+  if (khotanRuntimeRegistry.size === 1) {
+    return khotanRuntimeRegistry.values().next().value!;
+  }
+  throw new Error(
+    `Khotan runtime helpers for instance "${ctx.khotanInstanceId}" are not registered ` +
+      `(${String(khotanRuntimeRegistry.size)} instance(s) registered, none matched)`,
+  );
+}
+
+function normalizeRunUpdate(update: SendUpdateValue): {
+  counters: Record<string, number> | null;
+  metadata: Record<string, unknown> | null;
+  payload: KhotanRunUpdate & { type: NonNullable<KhotanRunUpdate["type"]> };
+} {
   const payload =
     typeof update === "string"
-      ? { type: "log", message: update }
-      : { type: "progress", ...update };
+      ? { type: "log" as const, message: update }
+      : { ...update, type: update.type ?? ("progress" as const) };
+
+  const counters: Record<string, number> = {};
+  for (const key of COUNTER_KEYS) {
+    const value = payload[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      counters[key] = value;
+    }
+  }
+
+  return {
+    counters: Object.keys(counters).length > 0 ? counters : null,
+    metadata: typeof update === "string" ? null : (update.metadata ?? null),
+    payload,
+  };
+}
+
+async function persistRunUpdate(
+  ctx: KhotanWorkflowContextRef | undefined,
+  update: KhotanPersistedRunUpdateInput,
+): Promise<void> {
+  if (!ctx?.khotanRunId) return;
+  const helpers = getRuntimeHelpers(ctx);
+  await helpers.appendRunUpdate(update);
+}
+
+export function sendUpdate(
+  update: SendUpdateValue,
+  options?: SendUpdateOptions,
+): Promise<void>;
+export function sendUpdate(
+  ctx: KhotanWorkflowContextRef & { khotanRunId: string },
+  update: SendUpdateValue,
+  options?: Omit<SendUpdateOptions, "ctx" | "runId" | "khotanInstanceId">,
+): Promise<void>;
+export async function sendUpdate(
+  first: SendUpdateValue | (KhotanWorkflowContextRef & { khotanRunId: string }),
+  second?: SendUpdateValue | SendUpdateOptions,
+  third: Omit<SendUpdateOptions, "ctx" | "runId" | "khotanInstanceId"> = {},
+): Promise<void> {
+  const calledWithContext = isWorkflowRunContext(first);
+  const update = (calledWithContext ? second : first) as SendUpdateValue;
+  const options: SendUpdateOptions = calledWithContext
+    ? third
+    : ((second as SendUpdateOptions | undefined) ?? {});
+  const context = calledWithContext
+    ? first
+    : (options.ctx ??
+      (options.runId
+        ? {
+            khotanInstanceId: options.khotanInstanceId ?? "",
+            khotanRunId: options.runId,
+          }
+        : undefined));
+
+  const timestamp = new Date();
+  const { counters, metadata, payload } = normalizeRunUpdate(update);
 
   try {
     const getWritable = await importWorkflowGetWritable();
-    const writable = getWritable<string>(options);
+    const streamOptions: { namespace?: string } = {};
+    if (options.namespace) streamOptions.namespace = options.namespace;
+    const writable = getWritable<string>(streamOptions);
     const writer = writable.getWriter();
 
     try {
       await writer.write(
-        `${JSON.stringify({ ...payload, timestamp: new Date().toISOString() })}\n`,
+        `${JSON.stringify({ ...payload, timestamp: timestamp.toISOString() })}\n`,
       );
     } finally {
       writer.releaseLock();
@@ -177,6 +288,16 @@ export async function sendUpdate(
     // Progress updates are best-effort. Missing or unavailable Workflow streams
     // must not fail durable sync steps.
   }
+
+  await persistRunUpdate(context, {
+    runId: context?.khotanRunId ?? "",
+    timestamp,
+    namespace: options.namespace ?? null,
+    type: payload.type,
+    message: payload.message,
+    metadata,
+    counters,
+  });
 }
 
 export function getWorkflowRunId(result: unknown): string | null {

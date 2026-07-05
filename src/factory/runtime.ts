@@ -69,6 +69,8 @@ import type {
   StuckRunReconcileItem,
   KhotanRunStatus,
   KhotanTerminalRunUpdate,
+  KhotanPersistedRunUpdateInput,
+  KhotanPersistedRunUpdate,
 } from "./types.js";
 import { bindPlugWithVars, khotanRuntimeRegistry } from "./types.js";
 
@@ -2205,6 +2207,54 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       : null;
   }
 
+  function isTerminalRunStatus(
+    status: KhotanRunStatus | null,
+  ): status is KhotanTerminalRunStatus {
+    return (
+      status === "completed" ||
+      status === "partial" ||
+      status === "failed" ||
+      status === "cancelled"
+    );
+  }
+
+  function serializeRunUpdateForStream(
+    update: KhotanPersistedRunUpdate,
+  ): string {
+    const payload: Record<string, unknown> = {
+      index: update.index,
+      timestamp: update.timestamp.toISOString(),
+      type: update.type,
+      message: update.message,
+    };
+    if (update.counters) {
+      Object.assign(payload, update.counters);
+    }
+    if (update.metadata) {
+      payload["metadata"] = update.metadata;
+    }
+    if (update.namespace) {
+      payload["namespace"] = update.namespace;
+    }
+    return `${JSON.stringify(payload)}\n`;
+  }
+
+  function streamFromRunUpdates(
+    updates: KhotanPersistedRunUpdate[],
+  ): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    return new ReadableStream({
+      start(controller) {
+        for (const update of updates) {
+          controller.enqueue(
+            encoder.encode(serializeRunUpdateForStream(update)),
+          );
+        }
+        controller.close();
+      },
+    });
+  }
+
   const NON_TERMINAL_RUN_STATUSES: ("pending" | "running")[] = [
     "pending",
     "running",
@@ -3086,18 +3136,60 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         if (!run) {
           return Response.json({ error: "Run not found" }, { status: 404 });
         }
+
+        const startIndexParam = url.searchParams.get("startIndex");
+        const parsedStartIndex =
+          startIndexParam == null ? null : Number.parseInt(startIndexParam, 10);
+        const namespace = url.searchParams.get("namespace") ?? undefined;
+        const persistedUpdates =
+          adapter.listRunUpdates === undefined
+            ? []
+            : await adapter
+                .listRunUpdates({
+                  runId,
+                  ...(typeof parsedStartIndex === "number" &&
+                  Number.isFinite(parsedStartIndex)
+                    ? { startIndex: parsedStartIndex }
+                    : {}),
+                  ...(namespace ? { namespace } : {}),
+                })
+                .catch((error: unknown) => {
+                  kd(
+                    "flow",
+                    `Failed to load persisted run updates for ${runId}`,
+                    error,
+                  );
+                  return [];
+                });
+
+        if (
+          persistedUpdates.length > 0 &&
+          isTerminalRunStatus(coerceRunStatus(run["status"]))
+        ) {
+          return new Response(streamFromRunUpdates(persistedUpdates), {
+            headers: {
+              "Content-Type": "application/x-ndjson; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+            },
+          });
+        }
+
         const workflowRunId = getRunWorkflowId(run);
         if (!workflowRunId) {
+          if (persistedUpdates.length > 0) {
+            return new Response(streamFromRunUpdates(persistedUpdates), {
+              headers: {
+                "Content-Type": "application/x-ndjson; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+              },
+            });
+          }
           return Response.json(
             { error: "Run does not have a Workflow run ID" },
             { status: 400 },
           );
         }
 
-        const startIndexParam = url.searchParams.get("startIndex");
-        const parsedStartIndex =
-          startIndexParam == null ? null : Number.parseInt(startIndexParam, 10);
-        const namespace = url.searchParams.get("namespace") ?? undefined;
         const getRun = await importWorkflowGetRun();
         const workflowRun = getRun(workflowRunId);
         const streamOptions: { startIndex?: number; namespace?: string } = {};
@@ -3111,6 +3203,14 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         const stream = workflowRun.getReadable?.(streamOptions);
 
         if (!stream) {
+          if (persistedUpdates.length > 0) {
+            return new Response(streamFromRunUpdates(persistedUpdates), {
+              headers: {
+                "Content-Type": "application/x-ndjson; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+              },
+            });
+          }
           return Response.json(
             { error: "Workflow run does not expose a readable stream" },
             { status: 400 },
@@ -4159,12 +4259,21 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     });
   }
 
+  async function appendRunUpdate(
+    update: KhotanPersistedRunUpdateInput,
+  ): Promise<{ index: number | null }> {
+    await init();
+    if (!adapter.appendRunUpdate) return { index: null };
+    return adapter.appendRunUpdate(update);
+  }
+
   // -------------------------------------------------------------------------
   // Runtime registry
   // -------------------------------------------------------------------------
 
   khotanRuntimeRegistry.set(instanceId, {
     cache: createCacheInstance,
+    appendRunUpdate,
     mapping: createMappingInstance,
     listMappings,
     lookupMapping,

@@ -600,6 +600,7 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(content).toContain("khotan_plugs");
       expect(content).toContain("khotan_flows");
       expect(content).toContain("khotan_runs");
+      expect(content).toContain("khotan_run_updates");
       expect(content).toContain("khotan_caches");
       expect(content).toContain("khotan_cache_entries");
       expect(content).not.toContain('from "khotan-data"');

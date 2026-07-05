@@ -33,6 +33,8 @@ export type {
   InflowWorkflow,
   OutflowWorkflow,
   RelayWorkflow,
+  KhotanPersistedRunUpdate,
+  KhotanPersistedRunUpdateInput,
   InflowConfig,
   OutflowConfig,
   RelayConfig,
@@ -97,6 +99,7 @@ export {
   wire,
   bindWorkflowPlug,
   khotanCache,
+  khotanRunUpdates,
   khotanMappings,
   khotanRuntimeRegistry,
 } from "./factory/types.js";
@@ -120,6 +123,7 @@ export type {
   WorkflowGetRunFn,
   WorkflowGetWritableFn,
   WorkflowRuntimeConfig,
+  SendUpdateOptions,
   WorkflowStartFn,
 } from "./factory/workflow.js";
 export { deriveCliToken } from "./factory/cli-auth.js";

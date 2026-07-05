@@ -90,6 +90,16 @@ The factory's `handler` SHALL be a function that accepts a standard `Request` ob
 - **AND** if the registered flow has a `workflow` function, it SHALL start that Vercel Workflow and persist the returned Workflow run ID
 - **AND** if the registered flow has an inline `run` function instead, it SHALL execute the function and update status, counters, metadata, and timing
 
+#### Scenario: Persist sendUpdate history
+- **WHEN** workflow code calls `sendUpdate(ctx, update)` with a Khotan workflow context
+- **THEN** the runtime SHALL write the update to the Workflow stream
+- **AND** it SHALL append the same update details to Khotan persistence for the run identified by `ctx.khotanRunId`
+
+#### Scenario: Replay completed-run updates
+- **WHEN** the handler receives `GET .../runs/:id/stream` for a completed run with persisted updates
+- **THEN** it SHALL return the persisted updates as NDJSON
+- **AND** it SHALL not require the Workflow live stream to still be available
+
 ### Requirement: Programmatic flow starter
 The factory instance SHALL expose `flow(flowNameOrId, options?).start(startOptions?)` so application code can start a tracked flow run without calling Vercel Workflow APIs directly.
 
