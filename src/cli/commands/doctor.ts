@@ -1,11 +1,20 @@
 import { Command } from "commander";
 import { output, resolveOutputDir } from "../cli-api.js";
 import {
+  checkKhotanRuntimeDatabaseState,
+  formatKhotanRuntimeSchemaCheck,
+} from "../../factory/runtime-schema.js";
+import {
   analyzeGeneratedFiles,
   readPackageVersion,
   type GeneratedFileReportItem,
   type GeneratedFileStatus,
 } from "../scaffold.js";
+import {
+  checkGeneratedSchemaFile,
+  loadRuntimeDatabaseStateFromUrl,
+  printGeneratedSchemaCheck,
+} from "../runtime-schema.js";
 
 interface DoctorSummary {
   total: number;
@@ -17,6 +26,13 @@ interface DoctorSummary {
   legacy: number;
   newer: number;
   upgradable: number;
+}
+
+interface DoctorOptions {
+  json?: boolean;
+  check?: boolean;
+  db?: boolean;
+  dbSchema?: string;
 }
 
 function summarize(files: GeneratedFileReportItem[]): DoctorSummary {
@@ -33,7 +49,7 @@ function summarize(files: GeneratedFileReportItem[]): DoctorSummary {
   };
 }
 
-function hasDrift(summary: DoctorSummary): boolean {
+function hasScaffoldDrift(summary: DoctorSummary): boolean {
   return (
     summary.stale > 0 ||
     summary.modified > 0 ||
@@ -63,7 +79,7 @@ function printSection(title: string, files: GeneratedFileReportItem[]): void {
   }
 }
 
-function printDoctorText(
+function printScaffoldDoctorText(
   version: string,
   outputDir: string,
   files: GeneratedFileReportItem[],
@@ -87,7 +103,7 @@ function printDoctorText(
     files.filter((file) => file.owner === "app"),
   );
 
-  if (!hasDrift(summary)) {
+  if (!hasScaffoldDrift(summary)) {
     console.log("\nAll stamped Khotan generated files are current.");
     return;
   }
@@ -105,30 +121,100 @@ function printDoctorText(
 }
 
 export const doctorCommand = new Command("doctor")
-  .description("Report Khotan generated scaffold drift")
+  .description("Check Khotan generated scaffold drift and runtime schema shape")
   .option("--json", "Print machine-readable JSON")
   .option("--check", "Exit non-zero when generated scaffold drift is found")
-  .action((opts: { json?: boolean; check?: boolean }) => {
+  .option("--no-db", "Skip live database checks")
+  .option("--db-schema <schema>", "Postgres schema to inspect")
+  .action(async (opts: DoctorOptions) => {
     const cwd = process.cwd();
     const version = readPackageVersion();
     const outputDir = resolveOutputDir(cwd);
     const files = analyzeGeneratedFiles(cwd, outputDir, version);
-    const summary = summarize(files);
-    const drift = hasDrift(summary);
+    const scaffoldSummary = summarize(files);
+    const scaffoldDrift = hasScaffoldDrift(scaffoldSummary);
+
+    const generatedSchema = checkGeneratedSchemaFile(cwd);
+    let databaseCheck: ReturnType<
+      typeof checkKhotanRuntimeDatabaseState
+    > | null = null;
+    let databaseError: string | null = null;
+    let databaseSkipped: string | null = null;
+
+    if (opts.db === false) {
+      databaseSkipped = "--no-db";
+    } else {
+      const databaseUrl = process.env["DATABASE_URL"];
+      if (!databaseUrl) {
+        databaseSkipped = "DATABASE_URL is not set";
+      } else {
+        try {
+          const state = await loadRuntimeDatabaseStateFromUrl(
+            cwd,
+            databaseUrl,
+            {
+              ...(opts.dbSchema ? { schemaName: opts.dbSchema } : {}),
+            },
+          );
+          databaseCheck = checkKhotanRuntimeDatabaseState(state);
+        } catch (error) {
+          databaseError =
+            error instanceof Error ? error.message : "Unknown database error";
+        }
+      }
+    }
+
+    const runtimeHasErrors =
+      generatedSchema.check.errors.length > 0 ||
+      (databaseCheck?.errors.length ?? 0) > 0 ||
+      databaseError !== null;
+    const shouldFail = opts.check
+      ? scaffoldDrift || runtimeHasErrors
+      : !opts.json && runtimeHasErrors;
 
     if (opts.json) {
       output({
-        ok: !opts.check || !drift,
+        ok: !shouldFail,
         packageVersion: version,
         outputDir,
-        summary,
+        summary: scaffoldSummary,
         files,
+        scaffold: {
+          drift: scaffoldDrift,
+          summary: scaffoldSummary,
+          files,
+        },
+        runtime: {
+          generatedSchema,
+          databaseCheck,
+          databaseError,
+          databaseSkipped,
+        },
       });
     } else {
-      printDoctorText(version, outputDir, files);
+      printScaffoldDoctorText(version, outputDir, files);
+      console.log("");
+      printGeneratedSchemaCheck(generatedSchema);
+
+      if (databaseSkipped) {
+        console.log(`\nSkipping database check (${databaseSkipped}).`);
+      } else if (databaseError) {
+        console.error(`\n✗ Database check failed: ${databaseError}`);
+      } else if (databaseCheck) {
+        console.log("\nChecking database runtime schema...");
+        console.log(formatKhotanRuntimeSchemaCheck(databaseCheck, "Database"));
+      }
+
+      if (runtimeHasErrors) {
+        console.error(
+          "\nKhotan runtime schema checks failed. Run `khotan-data generate --force` for generated schema drift and `khotan-data migrate --runtime` for Khotan-owned table upgrades.",
+        );
+      } else {
+        console.log("\n✓ Khotan doctor completed");
+      }
     }
 
-    if (opts.check && drift) {
+    if (shouldFail) {
       process.exitCode = 1;
     }
   });

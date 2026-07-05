@@ -369,7 +369,13 @@ function RunDetails({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [onStreamInbound, run.id, run.status, run.workflowRunId, streamingEnabled]);
+  }, [
+    onStreamInbound,
+    run.id,
+    run.status,
+    run.workflowRunId,
+    streamingEnabled,
+  ]);
 
   async function refreshDetail() {
     setError(null);

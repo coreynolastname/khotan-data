@@ -330,7 +330,9 @@ function WebhookEventDetails({ item }: { item: WebhookEventItem }) {
           )}
         </DetailField>
         <DetailField label="Processing window">
-          <div>Started {formatLocalDateTime(item.processingStartedAt, "-")}</div>
+          <div>
+            Started {formatLocalDateTime(item.processingStartedAt, "-")}
+          </div>
           <div>Completed {formatLocalDateTime(item.completedAt, "-")}</div>
         </DetailField>
       </div>

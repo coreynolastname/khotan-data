@@ -137,6 +137,12 @@ export type {
   SendUpdateOptions,
   WorkflowStartFn,
 } from "./factory/workflow.js";
+export type {
+  KhotanRuntimeDatabaseColumn,
+  KhotanRuntimeDatabaseIndex,
+  KhotanRuntimeDatabaseState,
+  KhotanRuntimeSchemaCheck,
+} from "./factory/runtime-schema.js";
 export { deriveCliToken } from "./factory/cli-auth.js";
 export { drizzleAdapter } from "./factory/drizzle-adapter.js";
 export type { KhotanDrizzleDatabase } from "./factory/drizzle-adapter.js";
@@ -152,3 +158,10 @@ export {
 export { khotan, toNextJsHandler } from "./factory/runtime.js";
 export { slackNotifier } from "./factory/notifiers.js";
 export { ingest } from "./factory/ingest.js";
+export {
+  KHOTAN_RUNTIME_SCHEMA_VERSION,
+  checkKhotanGeneratedSchemaSource,
+  checkKhotanRuntimeDatabaseState,
+  formatKhotanRuntimeSchemaCheck,
+  renderKhotanRuntimeMigrationSql,
+} from "./factory/runtime-schema.js";

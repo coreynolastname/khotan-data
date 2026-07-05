@@ -24,6 +24,12 @@ import {
   type ResourceRegistration,
 } from "./factory.js";
 import { z } from "zod";
+import {
+  KHOTAN_RUNTIME_REQUIRED_COLUMNS,
+  KHOTAN_RUNTIME_REQUIRED_INDEXES,
+  KHOTAN_RUNTIME_SCHEMA_VERSION,
+  type KhotanRuntimeDatabaseState,
+} from "./factory/runtime-schema.js";
 
 function khotanOpen(config: Omit<KhotanConfig, "authorize">) {
   return khotan({ ...config, authorize: false });
@@ -1003,6 +1009,20 @@ function createMockAdapter(): KhotanAdapter {
   };
 }
 
+function completeRuntimeSchemaState(): KhotanRuntimeDatabaseState {
+  return {
+    version: KHOTAN_RUNTIME_SCHEMA_VERSION,
+    columns: KHOTAN_RUNTIME_REQUIRED_COLUMNS.map((column) => ({
+      tableName: column.table,
+      columnName: column.column,
+    })),
+    indexes: KHOTAN_RUNTIME_REQUIRED_INDEXES.map((index) => ({
+      tableName: index.table,
+      indexName: index.name,
+    })),
+  };
+}
+
 function makeRequest(path: string, method = "GET", body?: unknown): Request {
   const init: RequestInit = { method };
   if (body !== undefined) {
@@ -1547,6 +1567,40 @@ describe("khotan factory", () => {
   });
 
   describe("init()", () => {
+    it("fails fast when adapter runtime schema inspection finds missing columns", async () => {
+      const state = completeRuntimeSchemaState();
+      state.columns = state.columns.filter(
+        (column) =>
+          !(
+            column.tableName === "khotan_runs" &&
+            column.columnName === "skipped"
+          ),
+      );
+      adapter.getRuntimeSchemaState = vi.fn(async () => state);
+
+      const instance = khotanOpen({ adapter, plugs: [] });
+
+      await expect(instance.init()).rejects.toThrow(
+        "Database is missing column khotan_runs.skipped.",
+      );
+      expect(adapter.upsertPlug).not.toHaveBeenCalled();
+    });
+
+    it("warns when database shape is current but version metadata is missing", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const state = completeRuntimeSchemaState();
+      state.version = null;
+      adapter.getRuntimeSchemaState = vi.fn(async () => state);
+
+      const instance = khotanOpen({ adapter, plugs: [] });
+      await instance.init();
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Database has no khotan_runtime_schema"),
+      );
+      warn.mockRestore();
+    });
+
     it("upserts registered plugs and flows", async () => {
       const plugs: PlugRegistration[] = [
         {

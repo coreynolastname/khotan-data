@@ -3049,6 +3049,66 @@ describe("CLI", { timeout: 30_000 }, () => {
     });
   });
 
+  describe("doctor", () => {
+    it("passes current generated schema without a database check", () => {
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, "db"), { recursive: true });
+      writePkgJson(tmpDir, { "drizzle-orm": "^0.35.0" });
+      fs.writeFileSync(
+        path.join(tmpDir, "drizzle.config.ts"),
+        `export default { schema: "./db/*" };`,
+      );
+      run("init", tmpDir);
+      run("generate", tmpDir);
+
+      const result = run("doctor --no-db", tmpDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("Generated schema matches");
+      expect(result.output).toContain("Skipping database check");
+    });
+
+    it("fails stale generated schema missing runtime version and required columns", () => {
+      fs.mkdirSync(path.join(tmpDir, "db"), { recursive: true });
+      writePkgJson(tmpDir, { "drizzle-orm": "^0.35.0" });
+      fs.writeFileSync(
+        path.join(tmpDir, "drizzle.config.ts"),
+        `export default { schema: "./db/*" };`,
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "db", "khotan.ts"),
+        [
+          'import { integer, pgTable, text } from "drizzle-orm/pg-core";',
+          'export const khotanRuns = pgTable("khotan_runs", {',
+          '  id: text("id").primaryKey(),',
+          '  failed: integer("failed").default(0).notNull(),',
+          "});",
+        ].join("\n"),
+      );
+
+      const result = run("doctor --no-db", tmpDir);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("KHOTAN_RUNTIME_SCHEMA_VERSION");
+      expect(result.output).toContain("Generated schema is missing table");
+    });
+  });
+
+  describe("migrate runtime schema", () => {
+    it("prints Khotan-owned runtime migration SQL", () => {
+      const result = run("migrate --print-runtime-sql", tmpDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("khotan-runtime-schema-version");
+      expect(result.output).toContain(
+        'create table if not exists "khotan_runtime_schema"',
+      );
+      expect(result.output).toContain(
+        'alter table "khotan_runs" add column if not exists "skipped"',
+      );
+    });
+  });
+
   describe("help", () => {
     it("shows usage when run with no args", () => {
       const result = run("", tmpDir);
@@ -3057,6 +3117,7 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(result.output).toContain("add");
       expect(result.output).toContain("generate");
       expect(result.output).toContain("migrate");
+      expect(result.output).toContain("doctor");
       expect(result.output).toContain("wire");
       expect(result.output).toContain("mappings");
     });

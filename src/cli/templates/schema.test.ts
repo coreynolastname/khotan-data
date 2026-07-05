@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { getTableColumns, getTableName } from "drizzle-orm";
 import {
+  KHOTAN_RUNTIME_SCHEMA_VERSION,
+  khotanRuntimeSchema,
   khotanPlugs,
   khotanFlows,
   khotanRuns,
@@ -28,6 +30,12 @@ describe("schema template", () => {
     it("exports khotanPlugs table", () => {
       expect(khotanPlugs).toBeDefined();
       expect(getTableName(khotanPlugs)).toBe("khotan_plugs");
+    });
+
+    it("exports khotanRuntimeSchema table", () => {
+      expect(KHOTAN_RUNTIME_SCHEMA_VERSION).toBe(2);
+      expect(khotanRuntimeSchema).toBeDefined();
+      expect(getTableName(khotanRuntimeSchema)).toBe("khotan_runtime_schema");
     });
 
     it("exports khotanFlows table", () => {

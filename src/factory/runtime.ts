@@ -38,6 +38,10 @@ import {
   getKhotanErrorCode,
   isWorkflowCancelledError,
 } from "./workflow.js";
+import {
+  checkKhotanRuntimeDatabaseState,
+  formatKhotanRuntimeSchemaCheck,
+} from "./runtime-schema.js";
 import type {
   KhotanConfig,
   KhotanInstance,
@@ -621,14 +625,39 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
   let initialized = false;
   let initPromise: Promise<void> | null = null;
+  let runtimeSchemaVerified = false;
   const resourceIdByName = new Map<string, string>();
   const resourceConfigById = new Map<string, ResourceRegistration>();
 
   const secret = config.secret ?? process.env["KHOTAN_SECRET"] ?? "";
 
+  async function verifyRuntimeSchema(): Promise<void> {
+    if (runtimeSchemaVerified || !adapter.getRuntimeSchemaState) return;
+    const state = await adapter.getRuntimeSchemaState();
+    const check = checkKhotanRuntimeDatabaseState(state);
+    if (check.errors.length > 0) {
+      throw new Error(
+        `[khotan] Runtime database schema check failed.\n${formatKhotanRuntimeSchemaCheck(
+          check,
+          "Database",
+        )}\nRun \`khotan-data doctor\` for details and \`khotan-data migrate --runtime\` to apply Khotan-owned upgrades.`,
+      );
+    }
+    if (check.warnings.length > 0) {
+      console.warn(
+        `[khotan] Runtime database schema warning.\n${formatKhotanRuntimeSchemaCheck(
+          check,
+          "Database",
+        )}`,
+      );
+    }
+    runtimeSchemaVerified = true;
+  }
+
   async function doInit(): Promise<void> {
     if (initialized) return;
     await waitUntilReady;
+    await verifyRuntimeSchema();
 
     resourceIdByName.clear();
     resourceConfigById.clear();
