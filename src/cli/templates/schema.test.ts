@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTableName } from "drizzle-orm";
+import { getTableColumns, getTableName } from "drizzle-orm";
 import {
   khotanPlugs,
   khotanFlows,
@@ -87,8 +87,18 @@ describe("schema template", () => {
       expect(columns).toContain("updated");
       expect(columns).toContain("deleted");
       expect(columns).toContain("failed");
+      expect(columns).toContain("skipped");
       expect(columns).toContain("error");
       expect(columns).toContain("metadata");
+    });
+
+    it("defines skipped as a not-null counter with a zero default", () => {
+      const columns = getTableColumns(khotanRuns);
+
+      expect(columns.skipped.name).toBe("skipped");
+      expect(columns.skipped.notNull).toBe(true);
+      expect(columns.skipped.hasDefault).toBe(true);
+      expect(columns.skipped.default).toBe(0);
     });
   });
 

@@ -111,6 +111,15 @@ const scenarioTemplates = [
         file: "app/api/khotan/[...all]/route.ts",
         text: 'import khotanData from "../../../../khotan/khotan"',
       },
+      {
+        file: "db/schema/khotan.ts",
+        text: 'skipped: integer("skipped").default(0).notNull()',
+      },
+    ],
+    expectedMigrationContent: [
+      {
+        text: '"skipped" integer DEFAULT 0 NOT NULL',
+      },
     ],
   },
   {
@@ -138,6 +147,10 @@ const scenarioTemplates = [
       {
         file: "src/db/index.ts",
         text: 'export * from "./khotan";',
+      },
+      {
+        file: "src/db/khotan.ts",
+        text: 'skipped: integer("skipped").default(0).notNull()',
       },
     ],
   },
@@ -173,6 +186,10 @@ const scenarioTemplates = [
       {
         file: "next.config.ts",
         text: "export default withWorkflow(nextConfig);",
+      },
+      {
+        file: "src/db/schema/khotan.ts",
+        text: 'skipped: integer("skipped").default(0).notNull()',
       },
     ],
     runtimeChecks: [
@@ -365,9 +382,43 @@ function assertInstalledFromTarball(projectDir, tarballPath) {
 }
 
 function khotanBin(projectDir) {
-  const binName =
-    process.platform === "win32" ? "khotan-data.cmd" : "khotan-data";
-  return path.join(projectDir, "node_modules", ".bin", binName);
+  return projectBin(projectDir, "khotan-data");
+}
+
+function projectBin(projectDir, binName) {
+  const executable = process.platform === "win32" ? `${binName}.cmd` : binName;
+  return path.join(projectDir, "node_modules", ".bin", executable);
+}
+
+function collectSqlFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectSqlFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".sql")) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function assertGeneratedMigrationIncludes(projectDir, text) {
+  const sqlFiles = collectSqlFiles(path.join(projectDir, "drizzle"));
+  if (sqlFiles.length === 0) {
+    throw new Error("Expected drizzle-kit to generate at least one SQL file");
+  }
+
+  const match = sqlFiles.find((file) =>
+    fs.readFileSync(file, "utf-8").includes(text),
+  );
+  if (!match) {
+    throw new Error(
+      `Expected generated migration SQL to include ${JSON.stringify(text)}`,
+    );
+  }
 }
 
 function runPackageManager(packageManagerName, args, options = {}) {
@@ -446,6 +497,22 @@ function runScenario(scenario, tarballPath, tmpRoot) {
   }
   for (const check of scenario.expectedContent) {
     assertIncludes(projectDir, check.file, check.text);
+  }
+  if (scenario.expectedMigrationContent) {
+    run(
+      projectBin(projectDir, "drizzle-kit"),
+      ["generate", "--name", "khotan"],
+      {
+        cwd: projectDir,
+        env: {
+          DATABASE_URL: "postgres://user:password@localhost:5432/app",
+        },
+        timeout: 120_000,
+      },
+    );
+    for (const check of scenario.expectedMigrationContent) {
+      assertGeneratedMigrationIncludes(projectDir, check.text);
+    }
   }
   runRuntimeChecks(scenario, projectDir);
 
