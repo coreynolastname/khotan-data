@@ -319,6 +319,7 @@ export function coerceCacheEntryRecord(
     cacheId: row["cacheId"],
     key: row["key"],
     value: row["value"],
+    version: typeof row["version"] === "string" ? row["version"] : undefined,
     expiresAt: coerceDate(row["expiresAt"]),
     createdAt: coerceDate(row["createdAt"]) ?? undefined,
     updatedAt: coerceDate(row["updatedAt"]) ?? undefined,

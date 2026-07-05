@@ -359,6 +359,51 @@ await hubspot.batchPost("/products/delete", removed, {
 await keyCache.set("last-success", [...currentKeys]);
 ```
 
+The same cache handle also exposes atomic helpers for concurrent workflow runs:
+
+```typescript
+const cursorCache = khotanCache(ctx, "shopify-products-cursor");
+const cursor = await cursorCache.getWithMetadata<{ next?: string }>("cursor");
+if (!cursor) {
+  await cursorCache.set("cursor", { next: response.nextCursor });
+}
+
+const saved = cursor
+  ? await cursorCache.compareAndSet(
+      "cursor",
+      { next: response.nextCursor },
+      { ifVersion: cursor.version },
+    )
+  : { ok: true };
+
+const claim = await cursorCache.claim(
+  "packiyo-push",
+  { runId: ctx.khotanRunId },
+  {
+    owner: ctx.khotanRunId,
+    ttl: "5m",
+    reclaimWhen: new Date(Date.now() - 10 * 60_000),
+  },
+);
+
+if (claim.claimed) {
+  await cursorCache.release("packiyo-push", {
+    owner: ctx.khotanRunId,
+    nextValue: { completed: true },
+    cooldownUntil: new Date(Date.now() + 30_000),
+  });
+}
+
+const dedupe = await cursorCache.markDedupe(
+  `event:${eventId}`,
+  { eventId },
+  { ttl: "7d" },
+);
+if (saved.ok && !dedupe.duplicate) {
+  // Continue processing.
+}
+```
+
 ## Quick Start
 
 ```typescript

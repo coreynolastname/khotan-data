@@ -94,6 +94,7 @@ interface StoredCacheEntry {
   cacheId: string;
   key: string;
   value: unknown;
+  version: string;
   expiresAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -155,9 +156,88 @@ function createMockAdapter(): KhotanAdapter {
   let mappingCounter = 0;
   let cacheCounter = 0;
   let cacheEntryCounter = 0;
+  let cacheEntryVersionCounter = 0;
   let wireCounter = 0;
   let webhookHandlerCounter = 0;
   let runCounter = 0;
+
+  function findCacheEntry(cacheId: string, key: string) {
+    return (
+      [...cacheEntryStore.values()].find(
+        (entry) => entry.cacheId === cacheId && entry.key === key,
+      ) ?? null
+    );
+  }
+
+  function isExpiredCacheEntry(entry: StoredCacheEntry, now = new Date()) {
+    return (
+      entry.expiresAt !== null && entry.expiresAt.getTime() <= now.getTime()
+    );
+  }
+
+  function nextCacheEntryVersion() {
+    return `v${++cacheEntryVersionCounter}`;
+  }
+
+  function updateCacheEntry(
+    entry: StoredCacheEntry,
+    value: unknown,
+    expiresAt: Date | null,
+  ) {
+    entry.value = value;
+    entry.expiresAt = expiresAt;
+    entry.updatedAt = new Date();
+    entry.version = nextCacheEntryVersion();
+    return entry;
+  }
+
+  function insertCacheEntry(entry: {
+    cacheId: string;
+    key: string;
+    value: unknown;
+    expiresAt?: Date | null;
+  }) {
+    const id = `cache-entry-${++cacheEntryCounter}`;
+    const now = new Date();
+    const stored: StoredCacheEntry = {
+      id,
+      cacheId: entry.cacheId,
+      key: entry.key,
+      value: entry.value,
+      version: nextCacheEntryVersion(),
+      expiresAt: entry.expiresAt ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    cacheEntryStore.set(id, stored);
+    return stored;
+  }
+
+  function isReleasedClaimAvailable(value: unknown, now = new Date()) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.kind !== "khotan.cache.claim" || record.status !== "released") {
+      return false;
+    }
+    if (typeof record.cooldownUntil !== "string" || !record.cooldownUntil) {
+      return true;
+    }
+    return new Date(record.cooldownUntil).getTime() <= now.getTime();
+  }
+
+  function isClaimedBy(value: unknown, owner: string) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    return (
+      record.kind === "khotan.cache.claim" &&
+      record.status === "claimed" &&
+      record.owner === owner
+    );
+  }
 
   return {
     upsertPlug: vi.fn(async (plug) => {
@@ -315,40 +395,113 @@ function createMockAdapter(): KhotanAdapter {
     }),
 
     getCacheEntry: vi.fn(async (cacheId: string, key: string) => {
-      return (
-        [...cacheEntryStore.values()].find(
-          (entry) => entry.cacheId === cacheId && entry.key === key,
-        ) ?? null
-      );
+      return findCacheEntry(cacheId, key);
     }),
 
     upsertCacheEntry: vi.fn(async (entry) => {
-      const existing = [...cacheEntryStore.values()].find(
-        (row) => row.cacheId === entry.cacheId && row.key === entry.key,
-      );
+      const existing = findCacheEntry(entry.cacheId, entry.key);
       if (existing) {
-        existing.value = entry.value;
-        existing.expiresAt = entry.expiresAt ?? null;
-        existing.updatedAt = new Date();
+        updateCacheEntry(existing, entry.value, entry.expiresAt ?? null);
         return { id: existing.id, created: false };
       }
-      const id = `cache-entry-${++cacheEntryCounter}`;
-      cacheEntryStore.set(id, {
-        id,
-        cacheId: entry.cacheId,
-        key: entry.key,
-        value: entry.value,
-        expiresAt: entry.expiresAt ?? null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      return { id, created: true };
+      const stored = insertCacheEntry(entry);
+      return { id: stored.id, created: true };
+    }),
+
+    compareAndSetCacheEntry: vi.fn(async (entry) => {
+      const existing = findCacheEntry(entry.cacheId, entry.key);
+      const hasConditions =
+        entry.ifVersion !== undefined ||
+        entry.ifUpdatedAt !== undefined ||
+        entry.ifValueSet === true;
+
+      if (!hasConditions) {
+        const stored = existing
+          ? updateCacheEntry(existing, entry.value, entry.expiresAt ?? null)
+          : insertCacheEntry(entry);
+        return { ok: true, entry: stored };
+      }
+
+      if (!existing || isExpiredCacheEntry(existing, entry.now)) {
+        return { ok: false, entry: existing };
+      }
+
+      if (
+        entry.ifVersion !== undefined &&
+        existing.version !== entry.ifVersion
+      ) {
+        return { ok: false, entry: existing };
+      }
+
+      if (
+        entry.ifUpdatedAt !== undefined &&
+        existing.updatedAt.getTime() !== entry.ifUpdatedAt.getTime()
+      ) {
+        return { ok: false, entry: existing };
+      }
+
+      if (
+        entry.ifValueSet === true &&
+        JSON.stringify(existing.value) !== JSON.stringify(entry.ifValue)
+      ) {
+        return { ok: false, entry: existing };
+      }
+
+      return {
+        ok: true,
+        entry: updateCacheEntry(existing, entry.value, entry.expiresAt ?? null),
+      };
+    }),
+
+    claimCacheEntry: vi.fn(async (entry) => {
+      const existing = findCacheEntry(entry.cacheId, entry.key);
+      const canClaim =
+        !existing ||
+        isExpiredCacheEntry(existing, entry.now) ||
+        (entry.reclaimWhen !== undefined &&
+          existing.updatedAt.getTime() <= entry.reclaimWhen.getTime()) ||
+        isReleasedClaimAvailable(existing.value, entry.now);
+
+      if (!canClaim) {
+        return { ok: false, entry: existing };
+      }
+
+      const stored = existing
+        ? updateCacheEntry(existing, entry.value, entry.expiresAt ?? null)
+        : insertCacheEntry(entry);
+      return { ok: true, entry: stored };
+    }),
+
+    releaseCacheEntry: vi.fn(async (entry) => {
+      const existing = findCacheEntry(entry.cacheId, entry.key);
+      if (
+        !existing ||
+        isExpiredCacheEntry(existing, entry.now) ||
+        !isClaimedBy(existing.value, entry.owner)
+      ) {
+        return { ok: false, entry: existing };
+      }
+
+      return {
+        ok: true,
+        entry: updateCacheEntry(existing, entry.value, entry.expiresAt ?? null),
+      };
+    }),
+
+    markDedupeCacheEntry: vi.fn(async (entry) => {
+      const existing = findCacheEntry(entry.cacheId, entry.key);
+      if (existing && !isExpiredCacheEntry(existing, entry.now)) {
+        return { ok: false, entry: existing };
+      }
+
+      const stored = existing
+        ? updateCacheEntry(existing, entry.value, entry.expiresAt ?? null)
+        : insertCacheEntry(entry);
+      return { ok: true, entry: stored };
     }),
 
     deleteCacheEntry: vi.fn(async (cacheId: string, key: string) => {
-      const existing = [...cacheEntryStore.values()].find(
-        (row) => row.cacheId === cacheId && row.key === key,
-      );
+      const existing = findCacheEntry(cacheId, key);
       if (existing) {
         cacheEntryStore.delete(existing.id);
       }
@@ -1322,6 +1475,265 @@ describe("khotan factory", () => {
         await expect(
           instance.cache("relay-checkpoint").get("last-successful-run"),
         ).resolves.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns cache values with metadata and version tokens", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-13T10:00:00Z"));
+
+      try {
+        const instance = khotanOpen({
+          adapter,
+          plugs: [],
+          caches: [{ name: "products-snapshot", ttl: "5m" }],
+        });
+
+        await instance
+          .cache("products-snapshot")
+          .set("all-products", { count: 2 });
+
+        const entry = await instance
+          .cache("products-snapshot")
+          .getWithMetadata<{ count: number }>("all-products");
+
+        expect(entry).toMatchObject({
+          key: "all-products",
+          value: { count: 2 },
+          createdAt: new Date("2026-06-13T10:00:00Z"),
+          updatedAt: new Date("2026-06-13T10:00:00Z"),
+          expiresAt: new Date("2026-06-13T10:05:00Z"),
+        });
+        expect(entry?.version).toMatch(/^v\d+$/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("supports compare-and-set success and stale-token failure", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-13T10:00:00Z"));
+
+      try {
+        const instance = khotanOpen({
+          adapter,
+          plugs: [],
+          caches: [{ name: "relay-cursor" }],
+        });
+        const cache = instance.cache("relay-cursor");
+
+        await cache.set("cursor", { cursor: "run-1" });
+        const before = await cache.getWithMetadata<{ cursor: string }>(
+          "cursor",
+        );
+        expect(before).not.toBeNull();
+
+        vi.setSystemTime(new Date("2026-06-13T10:01:00Z"));
+        const success = await cache.compareAndSet(
+          "cursor",
+          { cursor: "run-2" },
+          { ifVersion: before!.version },
+        );
+
+        expect(success.ok).toBe(true);
+        expect(success.entry?.value).toEqual({ cursor: "run-2" });
+        expect(success.entry?.version).not.toBe(before!.version);
+
+        const stale = await cache.compareAndSet(
+          "cursor",
+          { cursor: "run-stale" },
+          { ifVersion: before!.version },
+        );
+
+        expect(stale.ok).toBe(false);
+        expect(stale.entry?.value).toEqual({ cursor: "run-2" });
+
+        const latest = await cache.getWithMetadata<{ cursor: string }>(
+          "cursor",
+        );
+        const byUpdatedAtAndValue = await cache.compareAndSet(
+          "cursor",
+          { cursor: "run-3" },
+          {
+            ifUpdatedAt: latest!.updatedAt,
+            ifValue: { cursor: "run-2" },
+          },
+        );
+
+        expect(byUpdatedAtAndValue.ok).toBe(true);
+        await expect(cache.get("cursor")).resolves.toEqual({
+          cursor: "run-3",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("supports claims and stale claim reclaiming", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-13T10:00:00Z"));
+
+      try {
+        const instance = khotanOpen({
+          adapter,
+          plugs: [],
+          caches: [{ name: "purchase-order-leases" }],
+        });
+        const cache = instance.cache("purchase-order-leases");
+
+        const first = await cache.claim(
+          "packiyo-push",
+          { runId: "run-1" },
+          { owner: "run-1", ttl: "10m" },
+        );
+        expect(first.claimed).toBe(true);
+        expect(first.entry?.value).toMatchObject({
+          kind: "khotan.cache.claim",
+          status: "claimed",
+          owner: "run-1",
+          value: { runId: "run-1" },
+        });
+
+        const blocked = await cache.claim(
+          "packiyo-push",
+          { runId: "run-2" },
+          { owner: "run-2", ttl: "10m" },
+        );
+        expect(blocked.claimed).toBe(false);
+        expect(blocked.entry?.value).toMatchObject({ owner: "run-1" });
+
+        vi.setSystemTime(new Date("2026-06-13T10:03:00Z"));
+        const reclaimed = await cache.claim(
+          "packiyo-push",
+          { runId: "run-2" },
+          {
+            owner: "run-2",
+            ttl: "10m",
+            reclaimWhen: new Date("2026-06-13T10:01:00Z"),
+          },
+        );
+
+        expect(reclaimed.claimed).toBe(true);
+        expect(reclaimed.entry?.value).toMatchObject({
+          owner: "run-2",
+          value: { runId: "run-2" },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("guards release by owner and respects cooldown before re-claim", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-13T10:00:00Z"));
+
+      try {
+        const instance = khotanOpen({
+          adapter,
+          plugs: [],
+          caches: [{ name: "lease-cooldowns" }],
+        });
+        const cache = instance.cache("lease-cooldowns");
+
+        await cache.claim(
+          "warehouse-sync",
+          { runId: "run-1" },
+          { owner: "run-1", ttl: "30m" },
+        );
+
+        const wrongOwner = await cache.release("warehouse-sync", {
+          owner: "run-2",
+          nextValue: { released: true },
+        });
+        expect(wrongOwner.released).toBe(false);
+        expect(wrongOwner.entry?.value).toMatchObject({
+          status: "claimed",
+          owner: "run-1",
+        });
+
+        const release = await cache.release("warehouse-sync", {
+          owner: "run-1",
+          nextValue: { released: true },
+          cooldownUntil: new Date("2026-06-13T10:05:00Z"),
+        });
+        expect(release.released).toBe(true);
+        expect(release.entry?.value).toMatchObject({
+          status: "released",
+          owner: "run-1",
+          value: { released: true },
+          cooldownUntil: "2026-06-13T10:05:00.000Z",
+        });
+
+        const beforeCooldown = await cache.claim(
+          "warehouse-sync",
+          { runId: "run-2" },
+          { owner: "run-2", ttl: "30m" },
+        );
+        expect(beforeCooldown.claimed).toBe(false);
+
+        vi.setSystemTime(new Date("2026-06-13T10:05:01Z"));
+        const afterCooldown = await cache.claim(
+          "warehouse-sync",
+          { runId: "run-2" },
+          { owner: "run-2", ttl: "30m" },
+        );
+        expect(afterCooldown.claimed).toBe(true);
+        expect(afterCooldown.entry?.value).toMatchObject({
+          status: "claimed",
+          owner: "run-2",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("marks dedupe keys once until their TTL expires", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-13T10:00:00Z"));
+
+      try {
+        const instance = khotanOpen({
+          adapter,
+          plugs: [],
+          caches: [{ name: "webhook-dedupe" }],
+        });
+        const cache = instance.cache("webhook-dedupe");
+
+        const first = await cache.markDedupe(
+          "event:evt-1",
+          { eventId: "evt-1" },
+          { ttl: "2s" },
+        );
+        expect(first.marked).toBe(true);
+        expect(first.duplicate).toBe(false);
+        expect(first.entry?.value).toMatchObject({
+          kind: "khotan.cache.dedupe",
+          metadata: { eventId: "evt-1" },
+        });
+
+        const duplicate = await cache.markDedupe(
+          "event:evt-1",
+          { eventId: "evt-1-again" },
+          { ttl: "2s" },
+        );
+        expect(duplicate.marked).toBe(false);
+        expect(duplicate.duplicate).toBe(true);
+        expect(duplicate.entry?.value).toMatchObject({
+          metadata: { eventId: "evt-1" },
+        });
+
+        vi.advanceTimersByTime(2_001);
+        const afterExpiry = await cache.markDedupe(
+          "event:evt-1",
+          { eventId: "evt-1-again" },
+          { ttl: "2s" },
+        );
+        expect(afterExpiry.marked).toBe(true);
+        expect(afterExpiry.entry?.value).toMatchObject({
+          metadata: { eventId: "evt-1-again" },
+        });
       } finally {
         vi.useRealTimers();
       }

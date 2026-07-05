@@ -48,6 +48,20 @@ import type {
   WireInstance,
   CacheInstance,
   CacheEntryRecord,
+  CacheEntryTtl,
+  CacheEntryWithMetadata,
+  CacheWriteOptions,
+  CacheCompareAndSetOptions,
+  CacheMutationResult,
+  CacheClaimOptions,
+  CacheClaimValue,
+  CacheClaimResult,
+  CacheReleaseOptions,
+  CacheReleaseValue,
+  CacheReleaseResult,
+  CacheDedupeOptions,
+  CacheDedupeValue,
+  CacheDedupeResult,
   MappingInstance,
   CacheRegistration,
   ResourceRegistration,
@@ -786,19 +800,231 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     return cacheState;
   }
 
+  function resolveCacheExpiresAt(
+    cacheName: string,
+    defaultTtlSeconds: number | null,
+    ttl: CacheEntryTtl | undefined,
+    now = new Date(),
+  ): Date | null {
+    const ttlSeconds =
+      ttl === undefined
+        ? defaultTtlSeconds
+        : ttl === null
+          ? null
+          : parseCacheTtlSeconds(cacheName, ttl);
+
+    return ttlSeconds !== null
+      ? new Date(now.getTime() + ttlSeconds * 1_000)
+      : null;
+  }
+
+  function resolveCacheWriteExpiresAt(
+    cacheName: string,
+    defaultTtlSeconds: number | null,
+    options: CacheWriteOptions | undefined,
+    now = new Date(),
+  ): Date | null {
+    return resolveCacheExpiresAt(
+      cacheName,
+      defaultTtlSeconds,
+      options?.ttl,
+      now,
+    );
+  }
+
+  function normalizeCacheOwner(owner: string): string {
+    if (typeof owner !== "string" || !owner.trim()) {
+      throw new Error("Cache claim owner must be a non-empty string");
+    }
+    return owner.trim();
+  }
+
+  function coerceCacheDateOption(
+    label: string,
+    value: Date | string | null | undefined,
+  ): Date | null {
+    if (value === null || value === undefined) return null;
+    const date = coerceDate(value);
+    if (!date) {
+      throw new Error(`${label} must be a valid Date or ISO timestamp string`);
+    }
+    return date;
+  }
+
+  function hasOwn(object: object, key: string): boolean {
+    return Object.prototype.hasOwnProperty.call(object, key);
+  }
+
+  function cacheValuesEqual(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function toCacheEntryWithMetadata<T = unknown>(
+    entry: CacheEntryRecord | null,
+  ): CacheEntryWithMetadata<T> | null {
+    if (!entry || isCacheEntryExpired(entry)) {
+      return null;
+    }
+    const updatedAt = entry.updatedAt ?? entry.createdAt ?? new Date(0);
+    const createdAt = entry.createdAt ?? updatedAt;
+    return {
+      id: entry.id,
+      key: entry.key,
+      value: entry.value as T,
+      version: entry.version ?? `${String(updatedAt.getTime())}:${entry.id}`,
+      expiresAt: entry.expiresAt,
+      createdAt,
+      updatedAt,
+    };
+  }
+
+  function coerceCacheMutationResult<T = unknown>(result: {
+    ok: boolean;
+    entry: Record<string, unknown> | null;
+  }): CacheMutationResult<T> {
+    const entry = result.entry ? coerceCacheEntryRecord(result.entry) : null;
+    return {
+      ok: result.ok,
+      entry: toCacheEntryWithMetadata<T>(entry),
+    };
+  }
+
+  function createClaimValue<T>(
+    value: T,
+    owner: string,
+    now: Date,
+  ): CacheClaimValue<T> {
+    return {
+      kind: "khotan.cache.claim",
+      status: "claimed",
+      owner,
+      value,
+      claimedAt: now.toISOString(),
+    };
+  }
+
+  function createReleaseValue<T>(
+    options: CacheReleaseOptions<T>,
+    owner: string,
+    cooldownUntil: Date | null,
+    now: Date,
+  ): CacheReleaseValue<T> {
+    return {
+      kind: "khotan.cache.claim",
+      status: "released",
+      owner,
+      value: hasOwn(options, "nextValue") ? (options.nextValue ?? null) : null,
+      releasedAt: now.toISOString(),
+      cooldownUntil: cooldownUntil ? cooldownUntil.toISOString() : null,
+    };
+  }
+
+  function createDedupeValue<TMetadata>(
+    metadata: TMetadata,
+    now: Date,
+  ): CacheDedupeValue<TMetadata> {
+    return {
+      kind: "khotan.cache.dedupe",
+      metadata,
+      markedAt: now.toISOString(),
+    };
+  }
+
+  function isReleasedClaimAvailable(value: unknown, now: Date): boolean {
+    if (!isPlainObject(value)) return false;
+    if (
+      value["kind"] !== "khotan.cache.claim" ||
+      value["status"] !== "released"
+    ) {
+      return false;
+    }
+    const cooldownUntil = coerceDate(value["cooldownUntil"]);
+    return cooldownUntil === null || cooldownUntil.getTime() <= now.getTime();
+  }
+
+  function isActiveClaimOwnedBy(value: unknown, owner: string): boolean {
+    return (
+      isPlainObject(value) &&
+      value["kind"] === "khotan.cache.claim" &&
+      value["status"] === "claimed" &&
+      value["owner"] === owner
+    );
+  }
+
+  async function readCacheEntryForState(
+    cacheState: { id: string },
+    key: string,
+  ): Promise<CacheEntryRecord | null> {
+    const row = await adapter.getCacheEntry(cacheState.id, key);
+    if (!row) {
+      return null;
+    }
+    const entry = coerceCacheEntryRecord(row);
+    if (!entry || isCacheEntryExpired(entry)) {
+      return null;
+    }
+    return entry;
+  }
+
+  async function writeCacheEntryForState<T = unknown>(
+    cacheName: string,
+    cacheState: { id: string; ttlSeconds: number | null },
+    key: string,
+    value: T,
+    options: CacheWriteOptions | undefined,
+    now = new Date(),
+  ): Promise<CacheEntryWithMetadata<T> | null> {
+    const expiresAt = resolveCacheWriteExpiresAt(
+      cacheName,
+      cacheState.ttlSeconds,
+      options,
+      now,
+    );
+    return writeCacheEntryWithExpiresAt(cacheState, key, value, expiresAt);
+  }
+
+  async function writeCacheEntryWithExpiresAt<T = unknown>(
+    cacheState: { id: string },
+    key: string,
+    value: T,
+    expiresAt: Date | null,
+  ): Promise<CacheEntryWithMetadata<T> | null> {
+    await adapter.upsertCacheEntry({
+      cacheId: cacheState.id,
+      key,
+      value,
+      expiresAt,
+    });
+    return toCacheEntryWithMetadata<T>(
+      await readCacheEntryForState(cacheState, key),
+    );
+  }
+
   function createCacheInstance(cacheName: string): CacheInstance {
     return {
       async get<T = unknown>(key: string): Promise<T | null> {
         const entry = await readCacheEntry(cacheName, key);
         return entry ? (entry.value as T) : null;
       },
-      async set<T = unknown>(key: string, value: T): Promise<T> {
+      async getWithMetadata<T = unknown>(
+        key: string,
+      ): Promise<CacheEntryWithMetadata<T> | null> {
+        return toCacheEntryWithMetadata<T>(
+          await readCacheEntry(cacheName, key),
+        );
+      },
+      async set<T = unknown>(
+        key: string,
+        value: T,
+        options?: CacheWriteOptions,
+      ): Promise<T> {
         validateCacheKey(key);
         const cacheState = await resolveCacheState(cacheName);
-        const expiresAt =
-          cacheState.ttlSeconds !== null
-            ? new Date(Date.now() + cacheState.ttlSeconds * 1_000)
-            : null;
+        const expiresAt = resolveCacheWriteExpiresAt(
+          cacheName,
+          cacheState.ttlSeconds,
+          options,
+        );
         await adapter.upsertCacheEntry({
           cacheId: cacheState.id,
           key,
@@ -806,6 +1032,276 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           expiresAt,
         });
         return value;
+      },
+      async compareAndSet<T = unknown>(
+        key: string,
+        nextValue: T,
+        options: CacheCompareAndSetOptions<T> = {},
+      ): Promise<CacheMutationResult<T>> {
+        validateCacheKey(key);
+        const cacheState = await resolveCacheState(cacheName);
+        const now = new Date();
+        const ifUpdatedAt =
+          options.ifUpdatedAt === undefined
+            ? undefined
+            : (coerceCacheDateOption("ifUpdatedAt", options.ifUpdatedAt) ??
+              undefined);
+        const ifValueSet = hasOwn(options, "ifValue");
+        const expiresAt = resolveCacheWriteExpiresAt(
+          cacheName,
+          cacheState.ttlSeconds,
+          options,
+          now,
+        );
+
+        if (adapter.compareAndSetCacheEntry) {
+          return coerceCacheMutationResult<T>(
+            await adapter.compareAndSetCacheEntry({
+              cacheId: cacheState.id,
+              key,
+              value: nextValue,
+              expiresAt,
+              ifValueSet,
+              now,
+              ...(options.ifVersion !== undefined
+                ? { ifVersion: options.ifVersion }
+                : {}),
+              ...(ifUpdatedAt !== undefined ? { ifUpdatedAt } : {}),
+              ...(ifValueSet ? { ifValue: options.ifValue } : {}),
+            }),
+          );
+        }
+
+        const hasConditions =
+          options.ifVersion !== undefined ||
+          ifUpdatedAt !== undefined ||
+          ifValueSet;
+        const current = await readCacheEntryForState(cacheState, key);
+        const currentEntry = toCacheEntryWithMetadata<T>(current);
+
+        if (hasConditions) {
+          if (!currentEntry) {
+            return { ok: false, entry: null };
+          }
+          if (
+            options.ifVersion !== undefined &&
+            currentEntry.version !== options.ifVersion
+          ) {
+            return { ok: false, entry: currentEntry };
+          }
+          if (
+            ifUpdatedAt &&
+            currentEntry.updatedAt.getTime() !== ifUpdatedAt.getTime()
+          ) {
+            return { ok: false, entry: currentEntry };
+          }
+          if (
+            ifValueSet &&
+            !cacheValuesEqual(currentEntry.value, options.ifValue)
+          ) {
+            return { ok: false, entry: currentEntry };
+          }
+        }
+
+        return {
+          ok: true,
+          entry: await writeCacheEntryForState<T>(
+            cacheName,
+            cacheState,
+            key,
+            nextValue,
+            options,
+            now,
+          ),
+        };
+      },
+      async claim<T = unknown>(
+        key: string,
+        value: T,
+        options: CacheClaimOptions,
+      ): Promise<CacheClaimResult<T>> {
+        validateCacheKey(key);
+        const owner = normalizeCacheOwner(options.owner);
+        const cacheState = await resolveCacheState(cacheName);
+        const now = new Date();
+        const claimValue = createClaimValue(value, owner, now);
+        const reclaimWhen =
+          options.reclaimWhen === undefined
+            ? undefined
+            : (coerceCacheDateOption("reclaimWhen", options.reclaimWhen) ??
+              undefined);
+        const expiresAt = resolveCacheWriteExpiresAt(
+          cacheName,
+          cacheState.ttlSeconds,
+          options,
+          now,
+        );
+
+        if (adapter.claimCacheEntry) {
+          const result = coerceCacheMutationResult<CacheClaimValue<T>>(
+            await adapter.claimCacheEntry({
+              cacheId: cacheState.id,
+              key,
+              value: claimValue,
+              expiresAt,
+              now,
+              ...(reclaimWhen !== undefined ? { reclaimWhen } : {}),
+            }),
+          );
+          return { ...result, claimed: result.ok };
+        }
+
+        const current = await readCacheEntryForState(cacheState, key);
+        const canClaim =
+          !current ||
+          (reclaimWhen !== undefined &&
+            (current.updatedAt?.getTime() ?? 0) <= reclaimWhen.getTime()) ||
+          isReleasedClaimAvailable(current.value, now);
+
+        if (!canClaim) {
+          return {
+            ok: false,
+            claimed: false,
+            entry: toCacheEntryWithMetadata<CacheClaimValue<T>>(current),
+          };
+        }
+
+        return {
+          ok: true,
+          claimed: true,
+          entry: await writeCacheEntryForState<CacheClaimValue<T>>(
+            cacheName,
+            cacheState,
+            key,
+            claimValue,
+            options,
+            now,
+          ),
+        };
+      },
+      async release<T = unknown>(
+        key: string,
+        options: CacheReleaseOptions<T>,
+      ): Promise<CacheReleaseResult<T>> {
+        validateCacheKey(key);
+        const owner = normalizeCacheOwner(options.owner);
+        const cacheState = await resolveCacheState(cacheName);
+        const now = new Date();
+        const cooldownUntil = coerceCacheDateOption(
+          "cooldownUntil",
+          options.cooldownUntil,
+        );
+        const releaseValue = createReleaseValue(
+          options,
+          owner,
+          cooldownUntil,
+          now,
+        );
+        let expiresAt = resolveCacheWriteExpiresAt(
+          cacheName,
+          cacheState.ttlSeconds,
+          options,
+          now,
+        );
+        if (
+          cooldownUntil &&
+          expiresAt &&
+          expiresAt.getTime() < cooldownUntil.getTime()
+        ) {
+          expiresAt = cooldownUntil;
+        }
+
+        if (adapter.releaseCacheEntry) {
+          const result = coerceCacheMutationResult<CacheReleaseValue<T>>(
+            await adapter.releaseCacheEntry({
+              cacheId: cacheState.id,
+              key,
+              owner,
+              value: releaseValue,
+              expiresAt,
+              now,
+            }),
+          );
+          return { ...result, released: result.ok };
+        }
+
+        const current = await readCacheEntryForState(cacheState, key);
+        if (!current || !isActiveClaimOwnedBy(current.value, owner)) {
+          return {
+            ok: false,
+            released: false,
+            entry: toCacheEntryWithMetadata<CacheReleaseValue<T>>(current),
+          };
+        }
+
+        return {
+          ok: true,
+          released: true,
+          entry: await writeCacheEntryWithExpiresAt<CacheReleaseValue<T>>(
+            cacheState,
+            key,
+            releaseValue,
+            expiresAt,
+          ),
+        };
+      },
+      async markDedupe<TMetadata = Record<string, unknown>>(
+        key: string,
+        metadata: TMetadata,
+        options?: CacheDedupeOptions,
+      ): Promise<CacheDedupeResult<TMetadata>> {
+        validateCacheKey(key);
+        const cacheState = await resolveCacheState(cacheName);
+        const now = new Date();
+        const value = createDedupeValue(metadata, now);
+        const expiresAt = resolveCacheWriteExpiresAt(
+          cacheName,
+          cacheState.ttlSeconds,
+          options,
+          now,
+        );
+
+        if (adapter.markDedupeCacheEntry) {
+          const result = coerceCacheMutationResult<CacheDedupeValue<TMetadata>>(
+            await adapter.markDedupeCacheEntry({
+              cacheId: cacheState.id,
+              key,
+              value,
+              expiresAt,
+              now,
+            }),
+          );
+          return {
+            ...result,
+            marked: result.ok,
+            duplicate: !result.ok,
+          };
+        }
+
+        const current = await readCacheEntryForState(cacheState, key);
+        if (current) {
+          return {
+            ok: false,
+            marked: false,
+            duplicate: true,
+            entry:
+              toCacheEntryWithMetadata<CacheDedupeValue<TMetadata>>(current),
+          };
+        }
+
+        return {
+          ok: true,
+          marked: true,
+          duplicate: false,
+          entry: await writeCacheEntryForState<CacheDedupeValue<TMetadata>>(
+            cacheName,
+            cacheState,
+            key,
+            value,
+            options,
+            now,
+          ),
+        };
       },
       async delete(key: string): Promise<void> {
         validateCacheKey(key);
@@ -821,15 +1317,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
   ): Promise<CacheEntryRecord | null> {
     validateCacheKey(key);
     const cacheState = await resolveCacheState(cacheName);
-    const row = await adapter.getCacheEntry(cacheState.id, key);
-    if (!row) {
-      return null;
-    }
-    const entry = coerceCacheEntryRecord(row);
-    if (!entry || isCacheEntryExpired(entry)) {
-      return null;
-    }
-    return entry;
+    return readCacheEntryForState(cacheState, key);
   }
 
   function decorateResourceRecord(
