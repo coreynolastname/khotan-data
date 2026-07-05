@@ -1,4 +1,15 @@
-import { and, eq, desc, asc, sql, count, inArray, lte, gte } from "drizzle-orm";
+import {
+  and,
+  eq,
+  desc,
+  asc,
+  sql,
+  count,
+  inArray,
+  lte,
+  gte,
+  or,
+} from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type {
   ExtractTablesWithRelations,
@@ -74,6 +85,40 @@ export function drizzleAdapter<
 >(
   db: KhotanDrizzleDatabase<TQueryResult, TFullSchema, TSchema>,
 ): KhotanAdapter {
+  const cacheEntryVersion = sql<string>`xmin::text`;
+  const cacheEntryFields = {
+    id: khotanCacheEntries.id,
+    cacheId: khotanCacheEntries.cacheId,
+    key: khotanCacheEntries.key,
+    value: khotanCacheEntries.value,
+    version: cacheEntryVersion,
+    expiresAt: khotanCacheEntries.expiresAt,
+    createdAt: khotanCacheEntries.createdAt,
+    updatedAt: khotanCacheEntries.updatedAt,
+  };
+
+  async function getCacheEntryByKey(cacheId: string, key: string) {
+    const rows = await db
+      .select(cacheEntryFields)
+      .from(khotanCacheEntries)
+      .where(
+        and(
+          eq(khotanCacheEntries.cacheId, cacheId),
+          eq(khotanCacheEntries.key, key),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  function jsonbEquals(value: unknown) {
+    if (value === undefined) {
+      throw new Error("Cache compare value must be JSON-serializable");
+    }
+    const serialized = JSON.stringify(value);
+    return sql`${khotanCacheEntries.value} = ${serialized}::jsonb`;
+  }
+
   return {
     async upsertPlug(plug) {
       const rows = await db
@@ -490,25 +535,7 @@ export function drizzleAdapter<
     },
 
     async getCacheEntry(cacheId, key) {
-      const rows = await db
-        .select({
-          id: khotanCacheEntries.id,
-          cacheId: khotanCacheEntries.cacheId,
-          key: khotanCacheEntries.key,
-          value: khotanCacheEntries.value,
-          expiresAt: khotanCacheEntries.expiresAt,
-          createdAt: khotanCacheEntries.createdAt,
-          updatedAt: khotanCacheEntries.updatedAt,
-        })
-        .from(khotanCacheEntries)
-        .where(
-          and(
-            eq(khotanCacheEntries.cacheId, cacheId),
-            eq(khotanCacheEntries.key, key),
-          ),
-        )
-        .limit(1);
-      return rows[0] ?? null;
+      return getCacheEntryByKey(cacheId, key);
     },
 
     async upsertCacheEntry(entry) {
@@ -542,6 +569,178 @@ export function drizzleAdapter<
         .returning({ id: khotanCacheEntries.id });
 
       return { id: rows[0]!.id, created: existing.length === 0 };
+    },
+
+    async compareAndSetCacheEntry(entry) {
+      const hasConditions =
+        entry.ifVersion !== undefined ||
+        entry.ifUpdatedAt !== undefined ||
+        entry.ifValueSet === true;
+
+      if (!hasConditions) {
+        const rows = await db
+          .insert(khotanCacheEntries)
+          .values({
+            cacheId: entry.cacheId,
+            key: entry.key,
+            value: entry.value,
+            expiresAt: entry.expiresAt ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [khotanCacheEntries.cacheId, khotanCacheEntries.key],
+            set: {
+              value: entry.value,
+              expiresAt: entry.expiresAt ?? null,
+              updatedAt: new Date(),
+            },
+          })
+          .returning(cacheEntryFields);
+        return { ok: true, entry: rows[0] ?? null };
+      }
+
+      const filters = [
+        eq(khotanCacheEntries.cacheId, entry.cacheId),
+        eq(khotanCacheEntries.key, entry.key),
+        sql`(${khotanCacheEntries.expiresAt} is null or ${khotanCacheEntries.expiresAt} > ${entry.now})`,
+      ];
+
+      if (entry.ifVersion !== undefined) {
+        filters.push(sql`${cacheEntryVersion} = ${entry.ifVersion}`);
+      }
+
+      if (entry.ifUpdatedAt !== undefined) {
+        filters.push(
+          sql`${khotanCacheEntries.updatedAt} >= ${entry.ifUpdatedAt} and ${khotanCacheEntries.updatedAt} < ${new Date(entry.ifUpdatedAt.getTime() + 1)}`,
+        );
+      }
+
+      if (entry.ifValueSet === true) {
+        filters.push(jsonbEquals(entry.ifValue));
+      }
+
+      const rows = await db
+        .update(khotanCacheEntries)
+        .set({
+          value: entry.value,
+          expiresAt: entry.expiresAt ?? null,
+          updatedAt: new Date(),
+        })
+        .where(and(...filters))
+        .returning(cacheEntryFields);
+
+      if (rows[0]) {
+        return { ok: true, entry: rows[0] };
+      }
+
+      return {
+        ok: false,
+        entry: await getCacheEntryByKey(entry.cacheId, entry.key),
+      };
+    },
+
+    async claimCacheEntry(entry) {
+      const reclaimFilters = [
+        sql`${khotanCacheEntries.expiresAt} is not null and ${khotanCacheEntries.expiresAt} <= ${entry.now}`,
+        sql`${khotanCacheEntries.value}->>'kind' = 'khotan.cache.claim' and ${khotanCacheEntries.value}->>'status' = 'released' and coalesce(nullif(${khotanCacheEntries.value}->>'cooldownUntil', ''), '1970-01-01T00:00:00.000Z')::timestamptz <= ${entry.now}`,
+      ];
+
+      if (entry.reclaimWhen) {
+        reclaimFilters.push(
+          sql`${khotanCacheEntries.updatedAt} <= ${entry.reclaimWhen}`,
+        );
+      }
+      const reclaimWhere = or(...reclaimFilters);
+      if (!reclaimWhere) {
+        throw new Error("Cache claim requires at least one reclaim predicate");
+      }
+
+      const rows = await db
+        .insert(khotanCacheEntries)
+        .values({
+          cacheId: entry.cacheId,
+          key: entry.key,
+          value: entry.value,
+          expiresAt: entry.expiresAt ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [khotanCacheEntries.cacheId, khotanCacheEntries.key],
+          set: {
+            value: entry.value,
+            expiresAt: entry.expiresAt ?? null,
+            updatedAt: new Date(),
+          },
+          where: reclaimWhere,
+        })
+        .returning(cacheEntryFields);
+
+      if (rows[0]) {
+        return { ok: true, entry: rows[0] };
+      }
+
+      return {
+        ok: false,
+        entry: await getCacheEntryByKey(entry.cacheId, entry.key),
+      };
+    },
+
+    async releaseCacheEntry(entry) {
+      const rows = await db
+        .update(khotanCacheEntries)
+        .set({
+          value: entry.value,
+          expiresAt: entry.expiresAt ?? null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(khotanCacheEntries.cacheId, entry.cacheId),
+            eq(khotanCacheEntries.key, entry.key),
+            sql`(${khotanCacheEntries.expiresAt} is null or ${khotanCacheEntries.expiresAt} > ${entry.now})`,
+            sql`${khotanCacheEntries.value}->>'kind' = 'khotan.cache.claim'`,
+            sql`${khotanCacheEntries.value}->>'status' = 'claimed'`,
+            sql`${khotanCacheEntries.value}->>'owner' = ${entry.owner}`,
+          ),
+        )
+        .returning(cacheEntryFields);
+
+      if (rows[0]) {
+        return { ok: true, entry: rows[0] };
+      }
+
+      return {
+        ok: false,
+        entry: await getCacheEntryByKey(entry.cacheId, entry.key),
+      };
+    },
+
+    async markDedupeCacheEntry(entry) {
+      const rows = await db
+        .insert(khotanCacheEntries)
+        .values({
+          cacheId: entry.cacheId,
+          key: entry.key,
+          value: entry.value,
+          expiresAt: entry.expiresAt ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [khotanCacheEntries.cacheId, khotanCacheEntries.key],
+          set: {
+            value: entry.value,
+            expiresAt: entry.expiresAt ?? null,
+            updatedAt: new Date(),
+          },
+          where: sql`${khotanCacheEntries.expiresAt} is not null and ${khotanCacheEntries.expiresAt} <= ${entry.now}`,
+        })
+        .returning(cacheEntryFields);
+
+      if (rows[0]) {
+        return { ok: true, entry: rows[0] };
+      }
+
+      return {
+        ok: false,
+        entry: await getCacheEntryByKey(entry.cacheId, entry.key),
+      };
     },
 
     async deleteCacheEntry(cacheId, key) {

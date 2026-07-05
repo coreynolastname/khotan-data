@@ -530,14 +530,133 @@ export interface CacheEntryRecord {
   cacheId: string;
   key: string;
   value: unknown;
+  version?: string | undefined;
   expiresAt: Date | null;
   createdAt?: Date | undefined;
   updatedAt?: Date | undefined;
 }
 
+export type CacheEntryTtl = string | number | null;
+
+export interface CacheEntryWithMetadata<T = unknown> {
+  id: string;
+  key: string;
+  value: T;
+  version: string;
+  expiresAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CacheWriteOptions {
+  /**
+   * Per-write TTL override. Omit to use the registered cache default, or pass
+   * null to write without an expiry.
+   */
+  ttl?: CacheEntryTtl;
+}
+
+export interface CacheCompareAndSetOptions<
+  T = unknown,
+> extends CacheWriteOptions {
+  ifVersion?: string;
+  ifUpdatedAt?: Date | string;
+  ifValue?: T;
+}
+
+export interface CacheMutationResult<T = unknown> {
+  ok: boolean;
+  entry: CacheEntryWithMetadata<T> | null;
+}
+
+export interface CacheClaimOptions extends CacheWriteOptions {
+  owner: string;
+  /**
+   * Reclaim an existing unexpired claim when its row was last updated at or
+   * before this timestamp. Expired claims are always reclaimable.
+   */
+  reclaimWhen?: Date | string;
+}
+
+export interface CacheClaimValue<T = unknown> {
+  kind: "khotan.cache.claim";
+  status: "claimed";
+  owner: string;
+  value: T;
+  claimedAt: string;
+}
+
+export interface CacheClaimResult<T = unknown> extends CacheMutationResult<
+  CacheClaimValue<T>
+> {
+  claimed: boolean;
+}
+
+export interface CacheReleaseOptions<T = unknown> extends CacheWriteOptions {
+  owner: string;
+  nextValue?: T;
+  cooldownUntil?: Date | string | null;
+}
+
+export interface CacheReleaseValue<T = unknown> {
+  kind: "khotan.cache.claim";
+  status: "released";
+  owner: string;
+  value: T | null;
+  releasedAt: string;
+  cooldownUntil: string | null;
+}
+
+export interface CacheReleaseResult<T = unknown> extends CacheMutationResult<
+  CacheReleaseValue<T>
+> {
+  released: boolean;
+}
+
+export type CacheDedupeOptions = CacheWriteOptions;
+
+export interface CacheDedupeValue<TMetadata = Record<string, unknown>> {
+  kind: "khotan.cache.dedupe";
+  metadata: TMetadata;
+  markedAt: string;
+}
+
+export interface CacheDedupeResult<
+  TMetadata = Record<string, unknown>,
+> extends CacheMutationResult<CacheDedupeValue<TMetadata>> {
+  marked: boolean;
+  duplicate: boolean;
+}
+
 export interface CacheInstance {
   get<T = unknown>(key: string): Promise<T | null>;
-  set<T = unknown>(key: string, value: T): Promise<T>;
+  getWithMetadata<T = unknown>(
+    key: string,
+  ): Promise<CacheEntryWithMetadata<T> | null>;
+  set<T = unknown>(
+    key: string,
+    value: T,
+    options?: CacheWriteOptions,
+  ): Promise<T>;
+  compareAndSet<T = unknown>(
+    key: string,
+    nextValue: T,
+    options: CacheCompareAndSetOptions<T>,
+  ): Promise<CacheMutationResult<T>>;
+  claim<T = unknown>(
+    key: string,
+    value: T,
+    options: CacheClaimOptions,
+  ): Promise<CacheClaimResult<T>>;
+  release<T = unknown>(
+    key: string,
+    options: CacheReleaseOptions<T>,
+  ): Promise<CacheReleaseResult<T>>;
+  markDedupe<TMetadata = Record<string, unknown>>(
+    key: string,
+    metadata: TMetadata,
+    options?: CacheDedupeOptions,
+  ): Promise<CacheDedupeResult<TMetadata>>;
   delete(key: string): Promise<void>;
 }
 
@@ -803,6 +922,40 @@ export interface KhotanAdapter {
     value: unknown;
     expiresAt?: Date | null;
   }): Promise<{ id: string; created: boolean }>;
+  compareAndSetCacheEntry?(entry: {
+    cacheId: string;
+    key: string;
+    value: unknown;
+    expiresAt?: Date | null;
+    ifVersion?: string;
+    ifUpdatedAt?: Date;
+    ifValue?: unknown;
+    ifValueSet?: boolean;
+    now: Date;
+  }): Promise<{ ok: boolean; entry: Record<string, unknown> | null }>;
+  claimCacheEntry?(entry: {
+    cacheId: string;
+    key: string;
+    value: unknown;
+    expiresAt?: Date | null;
+    reclaimWhen?: Date;
+    now: Date;
+  }): Promise<{ ok: boolean; entry: Record<string, unknown> | null }>;
+  releaseCacheEntry?(entry: {
+    cacheId: string;
+    key: string;
+    owner: string;
+    value: unknown;
+    expiresAt?: Date | null;
+    now: Date;
+  }): Promise<{ ok: boolean; entry: Record<string, unknown> | null }>;
+  markDedupeCacheEntry?(entry: {
+    cacheId: string;
+    key: string;
+    value: unknown;
+    expiresAt?: Date | null;
+    now: Date;
+  }): Promise<{ ok: boolean; entry: Record<string, unknown> | null }>;
   deleteCacheEntry(cacheId: string, key: string): Promise<void>;
   listResources(): Promise<Record<string, unknown>[]>;
   getResource(id: string): Promise<Record<string, unknown> | null>;
