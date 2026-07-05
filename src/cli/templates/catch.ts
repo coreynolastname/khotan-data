@@ -13,13 +13,16 @@ export type {
   CatchConfig,
   CatchRegistration,
   CatchWorkflowContext as CatchContext,
+  FlowRunResult,
+  WebhookDuplicatePolicy,
+  WebhookIdempotencyKey,
 } from "khotan-data/factory";
 
 export type CatchWorkflow<
   TEvent extends Record<string, unknown> = Record<string, unknown>,
 > = (
   ctx: import("khotan-data/factory").CatchWorkflowContext<TEvent>,
-) => Promise<void>;
+) => Promise<import("khotan-data/factory").FlowRunResult | void | undefined>;
 
 // ---------------------------------------------------------------------------
 // Usage Example (create a file like webhooks/pollinate-catch.ts)
@@ -52,6 +55,7 @@ export type CatchWorkflow<
 //
 //   console.log("Handled webhook", {
 //     eventType: ctx.eventType,
+//     webhookEventId: ctx.webhookEventId,
 //     orderId: ctx.event.data.orderId,
 //     khotanRunId: ctx.khotanRunId,
 //   });
@@ -65,12 +69,14 @@ export type CatchWorkflow<
 // async function pollinateCatchWorkflow(ctx: CatchContext) {
 //   "use workflow";
 //   await notifyOps(ctx);
+//   return { created: 1 };
 // }
 //
 // export const pollinateCatch = catchEvent({
 //   name: "pollinate-orders",
 //   events: ["order.created"],
 //   schema: pollinateEventSchema,
+//   idempotencyKey: "id",
 //   workflow: pollinateCatchWorkflow,
 // });
 //

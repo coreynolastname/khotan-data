@@ -7,8 +7,8 @@
 // webhook events to another service with durable, retryable workflow steps.
 //
 // Pass workflows receive a PassContext with the parsed event, event type,
-// headers, and destVars (variables for the destination plug). Steps have
-// full Node.js access — construct destination plugs from destVars.
+// headers, destVars (variables for the destination plug), and Khotan lifecycle
+// IDs. Return a PassRunResult to finalize the linked khotan_runs row.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -24,17 +24,47 @@ export interface PassContext {
   headers: Record<string, string>;
   /** Decrypted variables for the destination plug (auto-injected by factory) */
   destVars: Record<string, string>;
+  /** Khotan webhook event ID created for this delivery */
+  webhookEventId: string;
+  /** Resolved event idempotency key, when available */
+  idempotencyKey: string | null;
   /** Khotan run ID created for this webhook handler execution */
   khotanRunId: string;
   /** Internal Khotan instance identifier for helper APIs */
   khotanInstanceId: string;
 }
 
+export interface PassRunResult {
+  status?: "completed" | "partial" | "failed" | "cancelled";
+  extracted?: number;
+  transformed?: number;
+  created?: number;
+  updated?: number;
+  deleted?: number;
+  failed?: number;
+  skipped?: number;
+  error?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export type WebhookIdempotencyContext = Pick<
+  PassContext,
+  "event" | "eventType" | "headers"
+>;
+
+export type WebhookIdempotencyKey =
+  | string
+  | ((
+      ctx: WebhookIdempotencyContext,
+    ) => string | null | undefined | Promise<string | null | undefined>);
+
 // ---------------------------------------------------------------------------
 // Workflow type — the function signature your workflow must conform to
 // ---------------------------------------------------------------------------
 
-export type PassWorkflow = (ctx: PassContext) => Promise<void>;
+export type PassWorkflow = (
+  ctx: PassContext,
+) => Promise<PassRunResult | void | undefined>;
 
 // ---------------------------------------------------------------------------
 // Config — passed to the pass() builder
@@ -47,6 +77,10 @@ export interface PassConfig {
   to: string;
   /** Event types this pass should receive */
   events?: string[];
+  /** Event idempotency key path or resolver. Defaults to common provider IDs. */
+  idempotencyKey?: WebhookIdempotencyKey;
+  /** Duplicate handling. Defaults to "ignore" when an idempotency key exists. */
+  duplicatePolicy?: "ignore" | "process";
   /** Workflow function that handles the forwarding */
   workflow: PassWorkflow;
 }
@@ -60,6 +94,8 @@ export interface PassRegistration {
   name: string;
   to: string;
   events?: string[];
+  idempotencyKey?: WebhookIdempotencyKey;
+  duplicatePolicy?: "ignore" | "process";
   workflow: PassWorkflow;
 }
 
@@ -73,6 +109,8 @@ export function pass(config: PassConfig): PassRegistration {
     name: config.name,
     to: config.to,
     events: config.events,
+    idempotencyKey: config.idempotencyKey,
+    duplicatePolicy: config.duplicatePolicy,
     workflow: config.workflow,
   };
 }
@@ -120,12 +158,14 @@ export function pass(config: PassConfig): PassRegistration {
 // async function pollinateToSlackWorkflow(ctx: PassContext) {
 //   "use workflow";
 //   await forwardEvent(ctx);
+//   return { created: 1 };
 // }
 //
 // export const pollinateToSlack = pass({
 //   name: "pollinate-to-slack",
 //   to: "slack",
 //   events: ["order.created"],
+//   idempotencyKey: "id",
 //   workflow: pollinateToSlackWorkflow,
 // });
 //

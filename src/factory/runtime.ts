@@ -67,6 +67,8 @@ import type {
   StuckRunReconcileItem,
   KhotanRunStatus,
   KhotanTerminalRunUpdate,
+  WebhookDuplicatePolicy,
+  WebhookEventStatus,
 } from "./types.js";
 import { bindPlugWithVars, khotanRuntimeRegistry } from "./types.js";
 
@@ -2446,6 +2448,114 @@ export function khotan(config: KhotanConfig): KhotanInstance {
   // Webhook processing helper (de-duplicated catch/pass loop)
   // -------------------------------------------------------------------------
 
+  function getHeaderValue(
+    headers: Record<string, string>,
+    headerName: string,
+  ): string | null {
+    const lowerName = headerName.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === lowerName) return value;
+    }
+    return null;
+  }
+
+  function getPathValue(
+    source: Record<string, unknown>,
+    path: string,
+  ): unknown {
+    const parts = path.split(".").filter(Boolean);
+    let current: unknown = source;
+    for (const part of parts) {
+      if (!isPlainObject(current)) return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  function normalizeIdempotencyValue(value: unknown): string | null {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed ? trimmed : null;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+    return null;
+  }
+
+  async function resolveWebhookIdempotencyKey(
+    handler: CatchRegistration | PassRegistration,
+    ctx: {
+      event: Record<string, unknown>;
+      eventType: string;
+      headers: Record<string, string>;
+    },
+  ): Promise<string | null> {
+    const configured = handler.idempotencyKey;
+    if (typeof configured === "function") {
+      return normalizeIdempotencyValue(await configured(ctx));
+    }
+
+    if (typeof configured === "string" && configured.trim()) {
+      const source = configured.trim();
+      if (source.startsWith("header:")) {
+        return normalizeIdempotencyValue(
+          getHeaderValue(ctx.headers, source.slice("header:".length)),
+        );
+      }
+      if (source.startsWith("headers.")) {
+        return normalizeIdempotencyValue(
+          getHeaderValue(ctx.headers, source.slice("headers.".length)),
+        );
+      }
+      const eventPath = source.startsWith("event.")
+        ? source.slice("event.".length)
+        : source;
+      return normalizeIdempotencyValue(getPathValue(ctx.event, eventPath));
+    }
+
+    const headerCandidates = [
+      "idempotency-key",
+      "x-idempotency-key",
+      "x-event-id",
+      "x-github-delivery",
+      "x-shopify-webhook-id",
+      "webhook-id",
+    ];
+    for (const header of headerCandidates) {
+      const value = normalizeIdempotencyValue(
+        getHeaderValue(ctx.headers, header),
+      );
+      if (value) return `${ctx.eventType}:${value}`;
+    }
+
+    for (const path of ["id", "eventId", "event_id", "data.id"]) {
+      const value = normalizeIdempotencyValue(getPathValue(ctx.event, path));
+      if (value) return `${ctx.eventType}:${value}`;
+    }
+
+    return null;
+  }
+
+  function getWebhookDuplicatePolicy(
+    handler: CatchRegistration | PassRegistration,
+  ): WebhookDuplicatePolicy {
+    return handler.duplicatePolicy === "process" ? "process" : "ignore";
+  }
+
+  function getWebhookAttempts(row: Record<string, unknown> | null): number {
+    const value = row?.["attempts"];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  }
+
+  function webhookEventStatusFromRun(
+    status: KhotanTerminalRunStatus,
+  ): Extract<WebhookEventStatus, "processed" | "failed"> {
+    return status === "failed" || status === "cancelled"
+      ? "failed"
+      : "processed";
+  }
+
   async function processWebhookHandler(
     handler: CatchRegistration | PassRegistration,
     ctx: {
@@ -2456,22 +2566,67 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       wireId: string | null;
       startWorkflow: Awaited<ReturnType<typeof importWorkflowStart>>;
       allPlugs: Record<string, unknown>[];
+      forceProcess?: boolean;
+      replayOfWebhookEventId?: string | null;
     },
   ): Promise<void> {
+    const handlerRow = ctx.dbHandlers.find(
+      (h) => h["name"] === handler.name && h["type"] === handler.type,
+    );
+    const handlerId = handlerRow ? (handlerRow["id"] as string) : null;
+    if (!handlerId || !ctx.wireId) {
+      return;
+    }
+
+    const idempotencyKey = await resolveWebhookIdempotencyKey(handler, ctx);
+    const duplicatePolicy = getWebhookDuplicatePolicy(handler);
+    const dedupeKey =
+      !ctx.forceProcess && duplicatePolicy === "ignore" && idempotencyKey
+        ? `${handler.type}:${handler.name}:${idempotencyKey}`
+        : null;
+
+    const recordWebhookEvent = async (status: WebhookEventStatus) =>
+      adapter.insertWebhookEvent({
+        wireId: ctx.wireId!,
+        webhookHandlerId: handlerId,
+        khotanRunId: null,
+        eventType: ctx.eventType,
+        payload: ctx.event,
+        headers: ctx.headers,
+        status,
+        idempotencyKey,
+        dedupeKey: status === "received" ? dedupeKey : null,
+        duplicateOfWebhookEventId:
+          status === "received" ? (ctx.replayOfWebhookEventId ?? null) : null,
+        completedAt:
+          status === "ignored" || status === "duplicate" ? new Date() : null,
+        error:
+          status === "ignored"
+            ? "Webhook handler ignored this event"
+            : status === "duplicate"
+              ? "Duplicate webhook event"
+              : null,
+      });
+
     if (
       Array.isArray(handler.events) &&
       handler.events.length > 0 &&
       !handler.events.includes(ctx.eventType)
     ) {
+      await recordWebhookEvent("ignored");
       return;
     }
 
-    const handlerRow = ctx.dbHandlers.find(
-      (h) => h["name"] === handler.name && h["type"] === handler.type,
-    );
     if (handlerRow?.["enabled"] === false) {
+      await recordWebhookEvent("ignored");
       return;
     }
+
+    const claimedEvent = await recordWebhookEvent("received");
+    if (claimedEvent.duplicate) {
+      return;
+    }
+    const webhookEventId = claimedEvent.id;
 
     let destVars: Record<string, string> = {};
     if (handler.type === "pass") {
@@ -2485,7 +2640,11 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       }
     }
 
-    const handlerId = handlerRow ? (handlerRow["id"] as string) : null;
+    await adapter.updateWebhookEvent(webhookEventId, {
+      status: "queued",
+      error: null,
+    });
+
     const { id: khotanRunId } = await adapter.insertRun({
       webhookHandlerId: handlerId,
       wireId: ctx.wireId,
@@ -2493,16 +2652,67 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       variant: "webhook",
       source: "webhook",
       status: "running",
+      metadata: {
+        webhookEventId,
+        eventType: ctx.eventType,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      },
+    });
+    const startedAt = Date.now();
+
+    await adapter.updateWebhookEvent(webhookEventId, {
+      khotanRunId,
+      status: "processing",
+      attempts:
+        getWebhookAttempts(await adapter.getWebhookEvent(webhookEventId)) + 1,
+      processingStartedAt: new Date(startedAt),
+      completedAt: null,
+      error: null,
     });
 
-    if (handlerId && ctx.wireId) {
-      await adapter.insertWebhookEvent({
-        wireId: ctx.wireId,
-        webhookHandlerId: handlerId,
+    let finalized = false;
+    async function finalizeWebhookRun(
+      result: FlowRunResult | undefined,
+      thrownError?: unknown,
+    ): Promise<void> {
+      if (finalized) return;
+      finalized = true;
+
+      const completedAt = new Date();
+      const durationMs = Date.now() - startedAt;
+      const runResult = thrownError ? undefined : result;
+      const counters = thrownError
+        ? { ...getFlowRunCounters(undefined), failed: 1 }
+        : getFlowRunCounters(runResult);
+      const status: KhotanTerminalRunStatus = thrownError
+        ? "failed"
+        : resolveTerminalRunStatus(runResult, counters);
+      const error = thrownError
+        ? getErrorMessage(thrownError)
+        : (runResult?.error ?? null);
+      const metadata =
+        runResult && "metadata" in runResult
+          ? (runResult.metadata ?? null)
+          : {
+              webhookEventId,
+              eventType: ctx.eventType,
+              ...(idempotencyKey ? { idempotencyKey } : {}),
+            };
+
+      await claimTerminalRun(khotanRunId, {
+        status,
+        completedAt,
+        durationMs,
+        ...counters,
+        error,
+        metadata,
+      });
+
+      await adapter.updateWebhookEvent(webhookEventId, {
         khotanRunId,
-        eventType: ctx.eventType,
-        payload: ctx.event,
-        headers: ctx.headers,
+        status: webhookEventStatusFromRun(status),
+        completedAt,
+        error,
       });
     }
 
@@ -2518,6 +2728,8 @@ export function khotan(config: KhotanConfig): KhotanInstance {
               eventType: ctx.eventType,
               headers: ctx.headers,
               destVars,
+              webhookEventId,
+              idempotencyKey,
               khotanRunId,
               khotanInstanceId: instanceId,
             }
@@ -2525,6 +2737,8 @@ export function khotan(config: KhotanConfig): KhotanInstance {
               event: eventForWorkflow,
               eventType: ctx.eventType,
               headers: ctx.headers,
+              webhookEventId,
+              idempotencyKey,
               khotanRunId,
               khotanInstanceId: instanceId,
             };
@@ -2537,16 +2751,162 @@ export function khotan(config: KhotanConfig): KhotanInstance {
           workflowRunId,
         });
       }
+      const returnValue = getWorkflowReturnValue(result);
+      if (returnValue) {
+        void returnValue
+          .then(async (value) => {
+            await finalizeWebhookRun(toFlowRunResult(value));
+          })
+          .catch(async (error: unknown) => {
+            await finalizeWebhookRun(undefined, error);
+          })
+          .catch((error: unknown) => {
+            kd(
+              "webhook",
+              `Failed to reconcile webhook run ${khotanRunId}`,
+              error,
+            );
+          });
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      await adapter.updateRun(khotanRunId, {
-        status: "failed",
-        completedAt: new Date(),
-        failed: 1,
-        error: message,
-      });
+      await finalizeWebhookRun(undefined, err);
       throw err;
     }
+  }
+
+  function coerceWebhookEventStatusValue(
+    value: unknown,
+  ): WebhookEventStatus | null {
+    return value === "received" ||
+      value === "queued" ||
+      value === "processing" ||
+      value === "processed" ||
+      value === "ignored" ||
+      value === "failed" ||
+      value === "duplicate"
+      ? value
+      : null;
+  }
+
+  function getRecordString(
+    record: Record<string, unknown>,
+    camelKey: string,
+    snakeKey?: string,
+  ): string | null {
+    const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : null);
+    return typeof value === "string" ? value : null;
+  }
+
+  async function replayWebhookEvent(
+    eventId: string,
+    options: { olderThanMs?: number; allowProcessed?: boolean } = {},
+  ): Promise<{ replayed: true }> {
+    const event = await adapter.getWebhookEvent(eventId);
+    if (!event) {
+      throw new KhotanInternalNotFoundError(
+        `Webhook event "${eventId}" not found`,
+      );
+    }
+
+    const status = coerceWebhookEventStatusValue(event["status"]);
+    if (status === "processing") {
+      const olderThanMs = Math.max(options.olderThanMs ?? 30 * 60_000, 1);
+      const processingStartedAt = coerceDate(event["processingStartedAt"]);
+      const isAbandoned =
+        !processingStartedAt ||
+        Date.now() - processingStartedAt.getTime() >= olderThanMs;
+      if (!isAbandoned) {
+        throw new KhotanWireRequestError(
+          `Webhook event "${eventId}" is still processing`,
+        );
+      }
+      await adapter.updateWebhookEvent(eventId, {
+        status: "failed",
+        completedAt: new Date(),
+        error: `Reclaimed abandoned processing claim before replay after ${String(olderThanMs)}ms`,
+      });
+    } else if (status === "processed" && !options.allowProcessed) {
+      throw new KhotanWireRequestError(
+        `Webhook event "${eventId}" is already processed; use replay to run it again`,
+      );
+    }
+
+    const wireId = getRecordString(event, "wireId", "wire_id");
+    const handlerId = getRecordString(
+      event,
+      "webhookHandlerId",
+      "webhook_handler_id",
+    );
+    if (!wireId || !handlerId) {
+      throw new KhotanWireRequestError(
+        `Webhook event "${eventId}" cannot be replayed without wire and handler IDs`,
+      );
+    }
+
+    const wireRecord = await adapter.getWire(wireId);
+    const plugId = wireRecord
+      ? getRecordString(wireRecord, "plugId", "plug_id")
+      : null;
+    const allPlugsRows = await adapter.listPlugs();
+    const plugRow = plugId
+      ? allPlugsRows.find((plug) => plug["id"] === plugId)
+      : null;
+    const plugName =
+      plugRow && typeof plugRow["name"] === "string" ? plugRow["name"] : null;
+    const plugReg = plugName
+      ? (plugs.find((plug) => plug.name === plugName) ?? null)
+      : null;
+    if (!plugReg) {
+      throw new KhotanInternalNotFoundError(
+        `Webhook event "${eventId}" references an unknown plug`,
+      );
+    }
+
+    const dbHandlers = await adapter.listWebhookHandlers(wireId);
+    const handlerRow = dbHandlers.find((row) => row["id"] === handlerId);
+    const handlerName =
+      handlerRow && typeof handlerRow["name"] === "string"
+        ? handlerRow["name"]
+        : null;
+    const handlerType =
+      handlerRow?.["type"] === "catch" || handlerRow?.["type"] === "pass"
+        ? handlerRow["type"]
+        : null;
+    const handlerConfig = getWebhookHandlersForPlug(plugReg).find(
+      (handler) => handler.name === handlerName && handler.type === handlerType,
+    );
+    if (!handlerConfig) {
+      throw new KhotanInternalNotFoundError(
+        `Webhook event "${eventId}" references an unregistered handler`,
+      );
+    }
+
+    const payload = isPlainObject(event["payload"]) ? event["payload"] : {};
+    const headers = isPlainObject(event["headers"])
+      ? Object.fromEntries(
+          Object.entries(event["headers"]).map(([key, value]) => [
+            key,
+            typeof value === "string" ? value : String(value),
+          ]),
+        )
+      : {};
+    const eventType =
+      typeof event["eventType"] === "string" ? event["eventType"] : "unknown";
+    const startWorkflow = await importWorkflowStart();
+
+    await processWebhookHandler(handlerConfig, {
+      event: payload,
+      eventType,
+      headers,
+      dbHandlers,
+      wireId,
+      startWorkflow,
+      allPlugs: allPlugsRows,
+      forceProcess: true,
+      replayOfWebhookEventId: eventId,
+    });
+
+    return { replayed: true };
   }
 
   // -------------------------------------------------------------------------
@@ -3181,6 +3541,66 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         getWaitUntil()(processingWork);
 
         return Response.json({ received: true }, { status: 202 });
+      },
+    },
+    {
+      method: "POST",
+      pattern: "webhook-events/:eventId/retry",
+      auth: "authorize",
+      handler: async ({ params, request }) => {
+        const body = (await request.json().catch(() => ({}))) as {
+          olderThanMs?: number;
+        };
+        try {
+          const options: { olderThanMs?: number; allowProcessed?: boolean } = {
+            allowProcessed: false,
+          };
+          if (typeof body.olderThanMs === "number") {
+            options.olderThanMs = body.olderThanMs;
+          }
+          const result = await replayWebhookEvent(params["eventId"]!, options);
+          return Response.json(result, { status: 202 });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Unknown error";
+          const status =
+            error instanceof KhotanInternalNotFoundError
+              ? 404
+              : error instanceof KhotanWireRequestError
+                ? 409
+                : 500;
+          return Response.json({ error: message }, { status });
+        }
+      },
+    },
+    {
+      method: "POST",
+      pattern: "webhook-events/:eventId/replay",
+      auth: "authorize",
+      handler: async ({ params, request }) => {
+        const body = (await request.json().catch(() => ({}))) as {
+          olderThanMs?: number;
+        };
+        try {
+          const options: { olderThanMs?: number; allowProcessed?: boolean } = {
+            allowProcessed: true,
+          };
+          if (typeof body.olderThanMs === "number") {
+            options.olderThanMs = body.olderThanMs;
+          }
+          const result = await replayWebhookEvent(params["eventId"]!, options);
+          return Response.json(result, { status: 202 });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Unknown error";
+          const status =
+            error instanceof KhotanInternalNotFoundError
+              ? 404
+              : error instanceof KhotanWireRequestError
+                ? 409
+                : 500;
+          return Response.json({ error: message }, { status });
+        }
       },
     },
     {

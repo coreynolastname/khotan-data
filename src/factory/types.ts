@@ -47,6 +47,34 @@ export interface FlowRunResult {
   metadata?: Record<string, unknown> | null;
 }
 
+export type WebhookWorkflowReturn =
+  | Promise<FlowRunResult | undefined>
+  // Async handlers that do not return a result infer Promise<void>; keep them source-compatible.
+  | Promise<void>;
+
+export type WebhookEventStatus =
+  | "received"
+  | "queued"
+  | "processing"
+  | "processed"
+  | "ignored"
+  | "failed"
+  | "duplicate";
+
+export type WebhookDuplicatePolicy = "ignore" | "process";
+
+export interface WebhookIdempotencyContext {
+  event: Record<string, unknown>;
+  eventType: string;
+  headers: Record<string, string>;
+}
+
+export type WebhookIdempotencyKey =
+  | string
+  | ((
+      ctx: WebhookIdempotencyContext,
+    ) => string | null | undefined | Promise<string | null | undefined>);
+
 export interface BoundPlug {
   get<T>(
     path: string,
@@ -432,9 +460,11 @@ export interface CatchRegistration<
   name: string;
   events?: string[];
   schema?: TSchema;
+  idempotencyKey?: WebhookIdempotencyKey;
+  duplicatePolicy?: WebhookDuplicatePolicy;
   workflow: (
     ctx: CatchWorkflowContext<WebhookEventFromSchema<TSchema>>,
-  ) => Promise<void>;
+  ) => WebhookWorkflowReturn;
 }
 
 export interface PassRegistration {
@@ -442,7 +472,9 @@ export interface PassRegistration {
   name: string;
   to: string;
   events?: string[];
-  workflow: (ctx: PassWorkflowContext) => Promise<void>;
+  idempotencyKey?: WebhookIdempotencyKey;
+  duplicatePolicy?: WebhookDuplicatePolicy;
+  workflow: (ctx: PassWorkflowContext) => WebhookWorkflowReturn;
 }
 
 export type WebhookRegistration = CatchRegistration | PassRegistration;
@@ -511,6 +543,8 @@ export interface CatchWorkflowContext<TEvent = Record<string, unknown>> {
   event: TEvent;
   eventType: string;
   headers: Record<string, string>;
+  webhookEventId: string;
+  idempotencyKey: string | null;
   khotanRunId: string;
   khotanInstanceId: string;
 }
@@ -520,6 +554,8 @@ export interface PassWorkflowContext {
   eventType: string;
   headers: Record<string, string>;
   destVars: Record<string, string>;
+  webhookEventId: string;
+  idempotencyKey: string | null;
   khotanRunId: string;
   khotanInstanceId: string;
 }
@@ -810,11 +846,34 @@ export interface KhotanAdapter {
   insertWebhookEvent(event: {
     wireId: string;
     webhookHandlerId: string;
-    khotanRunId: string;
+    khotanRunId?: string | null;
     eventType: string;
     payload: Record<string, unknown>;
     headers: Record<string, string>;
-  }): Promise<{ id: string }>;
+    status?: WebhookEventStatus;
+    idempotencyKey?: string | null;
+    dedupeKey?: string | null;
+    duplicateOfWebhookEventId?: string | null;
+    processingStartedAt?: Date | null;
+    completedAt?: Date | null;
+    error?: string | null;
+  }): Promise<{
+    id: string;
+    duplicate?: boolean;
+    duplicateOfWebhookEventId?: string | null;
+  }>;
+  getWebhookEvent(eventId: string): Promise<Record<string, unknown> | null>;
+  updateWebhookEvent(
+    eventId: string,
+    updates: {
+      khotanRunId?: string | null;
+      status?: WebhookEventStatus;
+      attempts?: number;
+      processingStartedAt?: Date | null;
+      completedAt?: Date | null;
+      error?: string | null;
+    },
+  ): Promise<void>;
   listWebhookEventsPage(params: {
     limit: number;
     offset: number;
@@ -1126,10 +1185,14 @@ export interface CatchConfig<
   events?: string[];
   /** Optional schema that validates and types ctx.event for the workflow */
   schema?: TSchema;
+  /** Event idempotency key path or resolver. Defaults to common provider IDs. */
+  idempotencyKey?: WebhookIdempotencyKey;
+  /** Duplicate handling. Defaults to "ignore" when an idempotency key exists. */
+  duplicatePolicy?: WebhookDuplicatePolicy;
   /** Workflow function that processes the event */
   workflow: (
     ctx: CatchWorkflowContext<WebhookEventFromSchema<TSchema>>,
-  ) => Promise<void>;
+  ) => WebhookWorkflowReturn;
 }
 
 export type WireConfig = WireRegistration;
@@ -1196,6 +1259,12 @@ export function catchEvent<
   };
   if (config.events !== undefined) registration.events = config.events;
   if (config.schema !== undefined) registration.schema = config.schema;
+  if (config.idempotencyKey !== undefined) {
+    registration.idempotencyKey = config.idempotencyKey;
+  }
+  if (config.duplicatePolicy !== undefined) {
+    registration.duplicatePolicy = config.duplicatePolicy;
+  }
   return registration;
 }
 

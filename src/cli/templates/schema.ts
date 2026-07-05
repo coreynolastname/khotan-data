@@ -191,22 +191,56 @@ export const khotanWebhookEvents = pgTable(
     webhookHandlerId: text("webhook_handler_id")
       .notNull()
       .references(() => khotanWebhookHandlers.id),
-    khotanRunId: text("khotan_run_id")
-      .notNull()
-      .references(() => khotanRuns.id),
+    khotanRunId: text("khotan_run_id").references(() => khotanRuns.id),
     eventType: text("event_type").notNull(),
     payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
     headers: jsonb("headers").notNull().$type<Record<string, string>>(),
+    status: text("status", {
+      enum: [
+        "received",
+        "queued",
+        "processing",
+        "processed",
+        "ignored",
+        "failed",
+        "duplicate",
+      ],
+    })
+      .default("received")
+      .notNull(),
+    idempotencyKey: text("idempotency_key"),
+    dedupeKey: text("dedupe_key"),
+    duplicateOfWebhookEventId: text("duplicate_of_webhook_event_id"),
+    attempts: integer("attempts").default(0).notNull(),
+    processingStartedAt: timestamp("processing_started_at", {
+      withTimezone: true,
+    }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    error: text("error"),
     receivedAt: timestamp("received_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
   },
   (table) => [
+    unique("khotan_webhook_events_handler_id_dedupe_key_unique").on(
+      table.webhookHandlerId,
+      table.dedupeKey,
+    ),
     index("khotan_webhook_events_wire_id_idx").on(table.wireId),
     index("khotan_webhook_events_webhook_handler_id_idx").on(
       table.webhookHandlerId,
     ),
     index("khotan_webhook_events_khotan_run_id_idx").on(table.khotanRunId),
+    index("khotan_webhook_events_status_idx").on(table.status),
+    index("khotan_webhook_events_duplicate_of_idx").on(
+      table.duplicateOfWebhookEventId,
+    ),
+    index("khotan_webhook_events_processing_started_at_idx").on(
+      table.processingStartedAt,
+    ),
     index("khotan_webhook_events_received_at_idx").on(table.receivedAt.desc()),
   ],
 );
