@@ -24,7 +24,7 @@ async function extractAndLoad(ctx: InflowContext) {
     khotanRunId: ctx.khotanRunId,
     variant: ctx.variant,
   });
-  await sendUpdate({
+  await sendUpdate(ctx, {
     message: "Starting product inflow",
     metadata: { flow: ctx.flow.name, variant: ctx.variant },
   });
@@ -41,7 +41,7 @@ async function extractAndLoad(ctx: InflowContext) {
 
   // Replace this with your app-specific transform and DB upsert.
   console.log("Fetched records", records.length);
-  await sendUpdate({
+  await sendUpdate(ctx, {
     message: `Fetched ${String(records.length)} products`,
     extracted: records.length,
     progress: 50,

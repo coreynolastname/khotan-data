@@ -94,18 +94,27 @@ function formatCounts(item: RunLogItem): string {
 
 function formatStreamLine(line: string): string {
   try {
-    const parsed = JSON.parse(line) as {
-      timestamp?: string;
-      message?: string;
-      type?: string;
-    };
-    const parsedDate = parsed.timestamp ? new Date(parsed.timestamp) : null;
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const timestamp =
+      typeof parsed.timestamp === "string" ? parsed.timestamp : undefined;
+    const message =
+      typeof parsed.message === "string" ? parsed.message : undefined;
+    const type = typeof parsed.type === "string" ? parsed.type : undefined;
+    const parsedDate = timestamp ? new Date(timestamp) : null;
     const prefix =
       parsedDate && !Number.isNaN(parsedDate.getTime())
         ? `[${formatLocalTime(parsedDate, { includeSeconds: true })}] `
         : "";
-    const type = parsed.type ? `${parsed.type}: ` : "";
-    return `${prefix}${type}${parsed.message ?? line}`;
+    const typeLabel = type ? `${type}: ` : "";
+    const detail = { ...parsed };
+    delete detail.timestamp;
+    delete detail.type;
+    delete detail.message;
+    const detailText =
+      Object.keys(detail).length > 0
+        ? `\n${JSON.stringify(detail, null, 2)}`
+        : "";
+    return `${prefix}${typeLabel}${message ?? line}${detailText}`;
   } catch {
     return line;
   }
@@ -167,7 +176,6 @@ function RunDetails({
   }, [fetchDetail, streamingEnabled]);
 
   useEffect(() => {
-    if (!run.workflowRunId) return;
     const isLiveRun = run.status === "pending" || run.status === "running";
     if (!streamingEnabled && isLiveRun) return;
 
@@ -219,13 +227,7 @@ function RunDetails({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [
-    onStreamInbound,
-    run.id,
-    run.status,
-    run.workflowRunId,
-    streamingEnabled,
-  ]);
+  }, [onStreamInbound, run.id, run.status, streamingEnabled]);
 
   async function refreshDetail() {
     setError(null);
@@ -325,7 +327,7 @@ function RunDetails({
 
       <div className="rounded-md bg-background p-3">
         <div className="mb-2 text-xs font-medium uppercase text-muted-foreground">
-          Workflow stream
+          Run updates
         </div>
         {streamLines.length > 0 ? (
           <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs">
@@ -334,15 +336,15 @@ function RunDetails({
         ) : (
           <p className="text-sm text-muted-foreground">
             {streamingEnabled
-              ? "No stream updates yet. Use sendUpdate() inside Workflow steps to emit progress."
+              ? "No run updates yet. Use sendUpdate(ctx, ...) inside Workflow steps to emit progress."
               : run.status === "pending" || run.status === "running"
                 ? "Streaming is off. Turn it on to follow live Workflow updates."
-                : "No stream logs found for this completed Workflow run."}
+                : "No persisted updates found for this completed run."}
           </p>
         )}
         {!streamingEnabled && streamLines.length > 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            Streaming is off. Showing the last loaded Workflow logs.
+            Streaming is off. Showing the last loaded run updates.
           </p>
         ) : null}
       </div>

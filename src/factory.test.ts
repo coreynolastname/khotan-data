@@ -71,6 +71,17 @@ interface StoredRun {
   metadata: Record<string, unknown> | null;
 }
 
+interface StoredRunUpdate {
+  runId: string;
+  index: number;
+  timestamp: Date;
+  namespace: string | null;
+  type: "progress" | "log" | "metric" | "error";
+  message: string;
+  metadata: Record<string, unknown> | null;
+  counters: Record<string, number> | null;
+}
+
 interface StoredWebhookEvent {
   id: string;
   wireId: string;
@@ -147,6 +158,7 @@ function createMockAdapter(): KhotanAdapter {
     }
   >();
   const runStore = new Map<string, StoredRun>();
+  const runUpdateStore = new Map<string, StoredRunUpdate[]>();
   const webhookEventStore = new Map<string, StoredWebhookEvent>();
   const variableStore = new Map<string, string>();
   let plugCounter = 0;
@@ -266,6 +278,48 @@ function createMockAdapter(): KhotanAdapter {
           })),
           hasMore: rows.length > limit,
         };
+      },
+    ),
+
+    appendRunUpdate: vi.fn(async (update) => {
+      const rows = runUpdateStore.get(update.runId) ?? [];
+      const stored: StoredRunUpdate = {
+        runId: update.runId,
+        index: rows.length,
+        timestamp: update.timestamp,
+        namespace: update.namespace ?? null,
+        type: update.type,
+        message: update.message,
+        metadata: update.metadata ?? null,
+        counters: update.counters ?? null,
+      };
+      runUpdateStore.set(update.runId, [...rows, stored]);
+      return { index: stored.index };
+    }),
+
+    listRunUpdates: vi.fn(
+      async ({
+        runId,
+        startIndex,
+        namespace,
+        limit,
+      }: {
+        runId: string;
+        startIndex?: number;
+        namespace?: string;
+        limit?: number;
+      }) => {
+        let rows = [...(runUpdateStore.get(runId) ?? [])];
+        if (namespace) {
+          rows = rows.filter((row) => row.namespace === namespace);
+        }
+        if (typeof startIndex === "number" && startIndex < 0) {
+          rows = rows.slice(startIndex);
+        } else if (typeof startIndex === "number") {
+          rows = rows.filter((row) => row.index >= startIndex);
+        }
+        if (typeof limit === "number") rows = rows.slice(0, limit);
+        return rows;
       },
     ),
 
@@ -891,6 +945,56 @@ describe("khotan factory", () => {
       message: "relayed products",
     });
     expect(typeof payload["timestamp"]).toBe("string");
+  });
+
+  it("persists sendUpdate history when called with workflow context", async () => {
+    const chunks: string[] = [];
+    configureWorkflowRuntime({
+      getWritable: vi.fn((options?: { namespace?: string }) => {
+        expect(options).toEqual({ namespace: "relay" });
+        return new WritableStream<string>({
+          write(chunk) {
+            chunks.push(chunk);
+          },
+        });
+      }),
+    });
+
+    khotanOpen({ adapter, plugs: [] });
+
+    await sendUpdate(
+      {
+        khotanInstanceId: "cfg_missing_in_test",
+        khotanRunId: "run-1",
+      },
+      {
+        message: "sent Fresh payload",
+        progress: 75,
+        updated: 3,
+        metadata: {
+          requestBody: { id: "sku_123" },
+          responseBody: { ok: true },
+        },
+      },
+      { namespace: "relay" },
+    );
+
+    expect(chunks).toHaveLength(1);
+    expect(adapter.appendRunUpdate).toHaveBeenCalledWith({
+      runId: "run-1",
+      timestamp: expect.any(Date),
+      namespace: "relay",
+      type: "progress",
+      message: "sent Fresh payload",
+      metadata: {
+        requestBody: { id: "sku_123" },
+        responseBody: { ok: true },
+      },
+      counters: {
+        progress: 75,
+        updated: 3,
+      },
+    });
   });
 
   describe("registration validation", () => {
@@ -3237,6 +3341,57 @@ describe("khotan factory", () => {
       );
       expect(res.status).toBe(200);
       await expect(res.text()).resolves.toContain("hello");
+    });
+
+    it("GET /api/khotan/runs/:id/stream replays persisted updates for completed runs", async () => {
+      const flowInstance = khotanOpen({ adapter, plugs: [] });
+      await adapter.insertRun({
+        flowId: null,
+        variant: "default",
+        source: "manual",
+        status: "completed",
+        workflowRunId: "workflow-run-1",
+        metadata: null,
+      });
+      await adapter.appendRunUpdate?.({
+        runId: "run-1",
+        timestamp: new Date("2026-01-02T03:04:05.000Z"),
+        namespace: "relay",
+        type: "progress",
+        message: "Fresh update finished",
+        metadata: {
+          requestBody: { sku: "SKU-1" },
+          responseBody: { ok: true },
+        },
+        counters: { updated: 1 },
+      });
+      __setWorkflowGetRunForTests(
+        vi.fn(() => {
+          throw new Error("workflow stream unavailable");
+        }),
+      );
+
+      const res = await flowInstance.handler(
+        makeRequest(
+          "/api/khotan/runs/run-1/stream?startIndex=-50&namespace=relay",
+        ),
+      );
+
+      expect(res.status).toBe(200);
+      const lines = (await res.text()).trim().split("\n");
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({
+        index: 0,
+        timestamp: "2026-01-02T03:04:05.000Z",
+        namespace: "relay",
+        type: "progress",
+        message: "Fresh update finished",
+        metadata: {
+          requestBody: { sku: "SKU-1" },
+          responseBody: { ok: true },
+        },
+        updated: 1,
+      });
     });
 
     it("POST /api/khotan/runs/:id/cancel cancels workflow runs", async () => {

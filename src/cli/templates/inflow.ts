@@ -41,12 +41,12 @@ export type {
 //     khotanRunId: ctx.khotanRunId,
 //     variant: ctx.variant,
 //   });
-//   await sendUpdate({ message: "Starting Shopify products inflow" });
+//   await sendUpdate(ctx, { message: "Starting Shopify products inflow" });
 //   const shopify = bindWorkflowPlug(shopifyPlug, ctx);
 //
 //   const response = await shopify.get<{ data?: Array<{ id: string; sku?: string }> }>("/products");
 //   const records = Array.isArray(response.data) ? response.data : [];
-//   await sendUpdate({ message: `Fetched ${records.length} products`, extracted: records.length });
+//   await sendUpdate(ctx, { message: `Fetched ${records.length} products`, extracted: records.length });
 //
 //   if (records.length > 0) {
 //     await db.insert(products).values(

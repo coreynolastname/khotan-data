@@ -1,4 +1,4 @@
-import { and, eq, desc, sql, count, inArray, lte } from "drizzle-orm";
+import { and, eq, desc, asc, sql, count, inArray, lte, gte } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   khotanPlugs,
@@ -8,11 +8,17 @@ import {
   khotanWebhookHandlers,
   khotanWebhookEvents,
   khotanRuns,
+  khotanRunUpdates,
   khotanMappingsTable,
   khotanCaches,
   khotanCacheEntries,
 } from "./schema.js";
-import type { FlowType, KhotanAdapter, KhotanRunStatus } from "./types.js";
+import type {
+  FlowType,
+  KhotanAdapter,
+  KhotanPersistedRunUpdate,
+  KhotanRunStatus,
+} from "./types.js";
 import { serializeConnectField, deserializeConnectField } from "./helpers.js";
 
 export type KhotanDrizzleDatabase<
@@ -22,6 +28,37 @@ export type KhotanDrizzleDatabase<
   PgDatabase<TQueryResult, TFullSchema>,
   "select" | "insert" | "update" | "delete" | "execute"
 >;
+
+function toPersistedRunUpdate(row: {
+  runId: string;
+  index: number;
+  timestamp: Date;
+  namespace: string | null;
+  type: "progress" | "log" | "metric" | "error";
+  message: string;
+  metadata: Record<string, unknown> | null;
+  counters: Record<string, number> | null;
+}): KhotanPersistedRunUpdate {
+  return {
+    runId: row.runId,
+    index: row.index,
+    timestamp: row.timestamp,
+    namespace: row.namespace,
+    type: row.type,
+    message: row.message,
+    metadata: row.metadata ?? null,
+    counters: row.counters ?? null,
+  };
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("duplicate key") ||
+    message.includes("unique constraint") ||
+    message.includes("SQLITE_CONSTRAINT")
+  );
+}
 
 export function drizzleAdapter<
   TQueryResult extends PgQueryResultHKT,
@@ -252,6 +289,72 @@ export function drizzleAdapter<
         }),
         hasMore,
       };
+    },
+
+    async appendRunUpdate(update) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const latest = await db
+          .select({ index: khotanRunUpdates.index })
+          .from(khotanRunUpdates)
+          .where(eq(khotanRunUpdates.runId, update.runId))
+          .orderBy(desc(khotanRunUpdates.index))
+          .limit(1);
+        const nextIndex = (latest[0]?.index ?? -1) + 1;
+
+        try {
+          const rows = await db
+            .insert(khotanRunUpdates)
+            .values({
+              runId: update.runId,
+              index: nextIndex,
+              timestamp: update.timestamp,
+              namespace: update.namespace ?? null,
+              type: update.type,
+              message: update.message,
+              metadata: update.metadata ?? null,
+              counters: update.counters ?? null,
+            })
+            .returning({ index: khotanRunUpdates.index });
+          return { index: rows[0]!.index };
+        } catch (error) {
+          if (attempt === 2 || !isUniqueConstraintError(error)) {
+            throw error;
+          }
+        }
+      }
+
+      throw new Error("Failed to append run update");
+    },
+
+    async listRunUpdates({ runId, startIndex, namespace, limit }) {
+      const filters = [eq(khotanRunUpdates.runId, runId)];
+      if (namespace) {
+        filters.push(eq(khotanRunUpdates.namespace, namespace));
+      }
+
+      if (typeof startIndex === "number" && startIndex < 0) {
+        const rows = await db
+          .select()
+          .from(khotanRunUpdates)
+          .where(and(...filters))
+          .orderBy(desc(khotanRunUpdates.index))
+          .limit(Math.min(Math.abs(startIndex), limit ?? 500));
+        return rows.reverse().map(toPersistedRunUpdate);
+      }
+
+      if (typeof startIndex === "number") {
+        filters.push(gte(khotanRunUpdates.index, startIndex));
+      }
+
+      const query = db
+        .select()
+        .from(khotanRunUpdates)
+        .where(and(...filters))
+        .orderBy(asc(khotanRunUpdates.index));
+
+      const rows =
+        typeof limit === "number" ? await query.limit(limit) : await query;
+      return rows.map(toPersistedRunUpdate);
     },
 
     async listStuckRuns({ flowId, olderThan, statuses, limit }) {

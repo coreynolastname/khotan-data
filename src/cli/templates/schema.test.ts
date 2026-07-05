@@ -4,9 +4,11 @@ import {
   khotanPlugs,
   khotanFlows,
   khotanRuns,
+  khotanRunUpdates,
   khotanPlugsRelations,
   khotanFlowsRelations,
   khotanRunsRelations,
+  khotanRunUpdatesRelations,
 } from "./schema.js";
 import type {
   KhotanPlug,
@@ -15,6 +17,8 @@ import type {
   NewKhotanFlow,
   KhotanRun,
   NewKhotanRun,
+  KhotanRunUpdate,
+  NewKhotanRunUpdate,
 } from "./schema.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -34,6 +38,11 @@ describe("schema template", () => {
     it("exports khotanRuns table", () => {
       expect(khotanRuns).toBeDefined();
       expect(getTableName(khotanRuns)).toBe("khotan_runs");
+    });
+
+    it("exports khotanRunUpdates table", () => {
+      expect(khotanRunUpdates).toBeDefined();
+      expect(getTableName(khotanRunUpdates)).toBe("khotan_run_updates");
     });
   });
 
@@ -92,6 +101,20 @@ describe("schema template", () => {
     });
   });
 
+  describe("khotanRunUpdates columns", () => {
+    it("has all required columns", () => {
+      const columns = Object.keys(khotanRunUpdates);
+      expect(columns).toContain("runId");
+      expect(columns).toContain("index");
+      expect(columns).toContain("timestamp");
+      expect(columns).toContain("namespace");
+      expect(columns).toContain("type");
+      expect(columns).toContain("message");
+      expect(columns).toContain("metadata");
+      expect(columns).toContain("counters");
+    });
+  });
+
   describe("relations", () => {
     it("exports plugs relations", () => {
       expect(khotanPlugsRelations).toBeDefined();
@@ -103,6 +126,10 @@ describe("schema template", () => {
 
     it("exports runs relations", () => {
       expect(khotanRunsRelations).toBeDefined();
+    });
+
+    it("exports run updates relations", () => {
+      expect(khotanRunUpdatesRelations).toBeDefined();
     });
   });
 
@@ -126,6 +153,13 @@ describe("schema template", () => {
       const _newRun: NewKhotanRun = {} as NewKhotanRun;
       expect(_run).toBeDefined();
       expect(_newRun).toBeDefined();
+    });
+
+    it("KhotanRunUpdate and NewKhotanRunUpdate types exist", () => {
+      const _update: KhotanRunUpdate = {} as KhotanRunUpdate;
+      const _newUpdate: NewKhotanRunUpdate = {} as NewKhotanRunUpdate;
+      expect(_update).toBeDefined();
+      expect(_newUpdate).toBeDefined();
     });
   });
 

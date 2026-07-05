@@ -59,7 +59,7 @@ import { sendUpdate } from "khotan-data/factory";
 // Step: top level, full Node.js access, retried independently.
 async function extractAndLoad(ctx: InflowContext) {
   "use step";
-  await sendUpdate({ message: "Starting product inflow", progress: 10 });
+  await sendUpdate(ctx, { message: "Starting product inflow", progress: 10 });
 
   // Quick-fire: ONE page by default. Disclose this to the user.
   const res = await fetch("https://api.example.com/products?page=1", {
