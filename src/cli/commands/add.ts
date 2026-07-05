@@ -28,6 +28,7 @@ import {
 import { installSkills, type SkillDefinition } from "../agent-detect.js";
 import { ensureWorkflowNextConfig } from "../next-config.js";
 import { loadConfigOutputDir } from "../cli-api.js";
+import { readStampedTemplateContent } from "../scaffold.js";
 
 function hasSrcLayout(cwd: string): boolean {
   return fs.existsSync(path.join(cwd, "src", "app"));
@@ -263,17 +264,11 @@ async function scaffoldFile(
   }
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  let content = fs.readFileSync(templatePath, "utf-8");
-  if (content.includes("__KHOTAN_INGEST_IMPORT__")) {
-    const outputDir = options.outputDir ?? "khotan";
-    const importBase = outputDir.startsWith("src/")
-      ? `@/${outputDir.slice(4)}`
-      : `@/${outputDir}`;
-    content = content.replace(
-      "__KHOTAN_INGEST_IMPORT__",
-      `${importBase}/ingests/ingest.example`,
-    );
+  const stampOptions: { outputDir?: string } = {};
+  if (options.outputDir !== undefined) {
+    stampOptions.outputDir = options.outputDir;
   }
+  const content = readStampedTemplateContent(templatePath, stampOptions);
   fs.writeFileSync(outputPath, content, "utf-8");
   return true;
 }

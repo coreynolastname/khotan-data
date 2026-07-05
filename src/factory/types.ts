@@ -543,6 +543,17 @@ export interface PassRegistration {
   workflow: (ctx: PassWorkflowContext) => WebhookWorkflowReturn;
 }
 
+export type PassWorkflow = (ctx: PassWorkflowContext) => WebhookWorkflowReturn;
+
+export interface PassConfig {
+  name: string;
+  to: string;
+  events?: string[];
+  idempotencyKey?: WebhookIdempotencyKey;
+  duplicatePolicy?: WebhookDuplicatePolicy;
+  workflow: PassWorkflow;
+}
+
 export type WebhookRegistration = CatchRegistration | PassRegistration;
 
 export interface CacheScope {
@@ -1557,6 +1568,25 @@ export function catchEvent<
   }
   return registration;
 }
+
+export function pass(config: PassConfig): PassRegistration {
+  const registration: PassRegistration = {
+    type: "pass",
+    name: config.name,
+    to: config.to,
+    workflow: config.workflow,
+  };
+  if (config.events !== undefined) registration.events = config.events;
+  if (config.idempotencyKey !== undefined) {
+    registration.idempotencyKey = config.idempotencyKey;
+  }
+  if (config.duplicatePolicy !== undefined) {
+    registration.duplicatePolicy = config.duplicatePolicy;
+  }
+  return registration;
+}
+
+export const passEvent = pass;
 
 export function wire(config: WireConfig): WireRegistration {
   return config;

@@ -11,6 +11,8 @@ import {
   khotanRuntimeRegistry,
   khotan,
   outflow,
+  pass,
+  passEvent,
   relay,
   deriveCliToken,
   sendUpdate,
@@ -7518,13 +7520,20 @@ describe("factory scaffold builders", () => {
     expect(relayRegistration.workflow).toBe(relayWorkflow);
   });
 
-  it("builds webhook registrations from catchEvent and wire", async () => {
+  it("builds webhook registrations from catchEvent, pass, and wire", async () => {
     const catchRegistration = catchEvent<{ id: string }>({
       name: "orders",
       events: ["order.created"],
       async workflow(ctx) {
         expect(ctx.event.id).toBe("evt_1");
       },
+    });
+    const passWorkflow = vi.fn(async () => {});
+    const passRegistration = pass({
+      name: "orders-to-slack",
+      to: "slack",
+      events: ["order.created"],
+      workflow: passWorkflow,
     });
     const wireRegistration = wire({
       events: ["order.created"],
@@ -7547,6 +7556,14 @@ describe("factory scaffold builders", () => {
       name: "orders",
       events: ["order.created"],
     });
+    expect(passRegistration).toMatchObject({
+      type: "pass",
+      name: "orders-to-slack",
+      to: "slack",
+      events: ["order.created"],
+    });
+    expect(passRegistration.workflow).toBe(passWorkflow);
+    expect(passEvent).toBe(pass);
     expect(await wireRegistration.onSubscribe({} as never)).toEqual({
       remoteId: "remote_1",
     });

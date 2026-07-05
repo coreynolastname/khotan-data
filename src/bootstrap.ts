@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveOutputDir } from "./cli/cli-api.js";
 import { configTemplate } from "./cli/config-template.js";
+import { coreGeneratedFiles, renderStampedDefinition } from "./cli/scaffold.js";
 
 export interface BootstrapOptions {
   cwd?: string;
@@ -13,10 +14,6 @@ export interface BootstrapResult {
   outputDir: string;
   created: string[];
   skipped: string[];
-}
-
-function hasSrcLayout(cwd: string): boolean {
-  return fs.existsSync(path.join(cwd, "src", "app"));
 }
 
 function writeIfMissing(
@@ -49,35 +46,14 @@ export async function createBootstrap(
 
   writeIfMissing(cwd, "khotan.config.ts", configTemplate(outputDir), result);
 
-  const khotanTsImport = outputDir.startsWith("src/")
-    ? `@/${outputDir.slice(4)}/khotan`
-    : `@/${outputDir}/khotan`;
-
-  writeIfMissing(
-    cwd,
-    path.join(outputDir, "khotan.ts"),
-    `import { khotan, drizzleAdapter } from "khotan-data/factory";\n` +
-      `import { db } from "@/db";\n\n` +
-      `export default khotan({\n` +
-      `  adapter: drizzleAdapter(db),\n` +
-      `  plugs: [],\n` +
-      `});\n`,
-    result,
-  );
-
-  const routePath = hasSrcLayout(cwd)
-    ? "src/app/api/khotan/[...all]/route.ts"
-    : "app/api/khotan/[...all]/route.ts";
-  writeIfMissing(
-    cwd,
-    routePath,
-    `import { toNextJsHandler } from "khotan-data/factory";\n` +
-      `import khotanData from "${khotanTsImport}";\n\n` +
-      `export const { GET, POST, PUT, PATCH, DELETE } = toNextJsHandler(\n` +
-      `  khotanData.handler,\n` +
-      `);\n`,
-    result,
-  );
+  for (const definition of coreGeneratedFiles(cwd, outputDir)) {
+    writeIfMissing(
+      cwd,
+      definition.relPath,
+      renderStampedDefinition(definition),
+      result,
+    );
+  }
 
   return result;
 }
