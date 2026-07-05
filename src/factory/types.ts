@@ -289,6 +289,15 @@ export interface FlowWorkflowContext<TBody = unknown> {
   khotanInstanceId: string;
 }
 
+interface FlowWorkflowHandlerBivariance<TBody> {
+  bivarianceHack(
+    ctx: FlowWorkflowContext<TBody>,
+  ): Promise<FlowRunResult | undefined>;
+}
+
+export type FlowWorkflowHandler<TBody = unknown> =
+  FlowWorkflowHandlerBivariance<TBody>["bivarianceHack"];
+
 export interface KhotanRunUpdate {
   type?: "progress" | "log" | "metric" | "error";
   message: string;
@@ -315,9 +324,7 @@ export interface FlowRegistration<TBody = unknown> {
   variants?: Record<string, FlowVariant>;
   resource?: string;
   to?: string;
-  workflow?: (
-    ctx: FlowWorkflowContext<TBody>,
-  ) => Promise<FlowRunResult | undefined>;
+  workflow?: FlowWorkflowHandler<TBody>;
   run?(ctx: FlowRunContext<TBody>): Promise<FlowRunResult | undefined>;
 }
 
@@ -1070,10 +1077,6 @@ export type RelayWorkflow<TBody = unknown> = (
   ctx: RelayContext<TBody>,
 ) => Promise<FlowRunResult | undefined>;
 
-type DurableFlowWorkflow<TBody> = NonNullable<
-  FlowRegistration<TBody>["workflow"]
->;
-
 export interface InflowConfig<TBody = unknown> {
   /** Unique name for this flow (used for DB tracking and Hub display) */
   name: string;
@@ -1140,7 +1143,7 @@ export function inflow<TBody = unknown>(
   const registration: FlowRegistration<TBody> = {
     name: config.name,
     type: "inflow",
-    workflow: config.workflow as DurableFlowWorkflow<TBody>,
+    workflow: config.workflow,
   };
   if (config.resource !== undefined) registration.resource = config.resource;
   if (config.variants) {
@@ -1157,7 +1160,7 @@ export function outflow<TBody = unknown>(
   const registration: FlowRegistration<TBody> = {
     name: config.name,
     type: "outflow",
-    workflow: config.workflow as DurableFlowWorkflow<TBody>,
+    workflow: config.workflow,
   };
   if (config.resource !== undefined) registration.resource = config.resource;
   if (config.variants) {
@@ -1175,7 +1178,7 @@ export function relay<TBody = unknown>(
     name: config.name,
     type: "relay",
     to: config.to,
-    workflow: config.workflow as DurableFlowWorkflow<TBody>,
+    workflow: config.workflow,
   };
   if (config.resource !== undefined) registration.resource = config.resource;
   if (config.variants) {

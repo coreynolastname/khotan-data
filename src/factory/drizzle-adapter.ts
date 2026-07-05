@@ -1,5 +1,9 @@
 import { and, eq, desc, sql, count, inArray, lte } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import type {
+  ExtractTablesWithRelations,
+  TablesRelationalConfig,
+} from "drizzle-orm/relations";
 import {
   khotanPlugs,
   khotanResources,
@@ -18,15 +22,21 @@ import { serializeConnectField, deserializeConnectField } from "./helpers.js";
 export type KhotanDrizzleDatabase<
   TQueryResult extends PgQueryResultHKT = PgQueryResultHKT,
   TFullSchema extends Record<string, unknown> = Record<string, never>,
+  TSchema extends TablesRelationalConfig =
+    ExtractTablesWithRelations<TFullSchema>,
 > = Pick<
-  PgDatabase<TQueryResult, TFullSchema>,
+  PgDatabase<TQueryResult, TFullSchema, TSchema>,
   "select" | "insert" | "update" | "delete" | "execute"
 >;
 
 export function drizzleAdapter<
   TQueryResult extends PgQueryResultHKT,
   TFullSchema extends Record<string, unknown>,
->(db: KhotanDrizzleDatabase<TQueryResult, TFullSchema>): KhotanAdapter {
+  TSchema extends TablesRelationalConfig =
+    ExtractTablesWithRelations<TFullSchema>,
+>(
+  db: KhotanDrizzleDatabase<TQueryResult, TFullSchema, TSchema>,
+): KhotanAdapter {
   return {
     async upsertPlug(plug) {
       const rows = await db

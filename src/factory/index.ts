@@ -17,6 +17,7 @@ export type {
   BindablePlug,
   FlowRunContext,
   FlowWorkflowContext,
+  FlowWorkflowHandler,
   KhotanRunUpdate,
   RunSource,
   FlowHookContext,
@@ -122,6 +123,7 @@ export { deriveCliToken } from "./cli-auth.js";
 
 // Drizzle adapter
 export { drizzleAdapter } from "./drizzle-adapter.js";
+export type { KhotanDrizzleDatabase } from "./drizzle-adapter.js";
 
 // Webhook helpers
 export { verifyHmacSha256 } from "./crypto.js";
