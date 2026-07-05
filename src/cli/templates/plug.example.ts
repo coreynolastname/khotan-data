@@ -13,6 +13,7 @@ import {
   bearer,
   hmacSignature,
   plug,
+  tokenCacheStore,
   tokenExchange,
   type StoredAuthToken,
 } from "./plug";
@@ -158,6 +159,60 @@ export const formOAuthApi = plug({
       }
       return { accessToken: value.access_token, expiresIn: value.expires_in };
     },
+  }),
+});
+
+const exampleTokenCache = new Map<string, unknown>();
+
+export const profiledOAuthApi = plug({
+  name: "profiled-oauth",
+  baseUrl: (vars) => vars["baseUrl"] ?? "https://api.example.com",
+  vars: [
+    { key: "baseUrl", label: "Base URL", type: "url" },
+    { key: "orgId", label: "Org ID", type: "text", required: true },
+    { key: "clientId", label: "Client ID", type: "text", required: true },
+    {
+      key: "clientSecret",
+      label: "Client secret",
+      type: "password",
+      secret: true,
+      required: true,
+    },
+  ] as const,
+  auth: tokenExchange({
+    tokenEndpoint: "/oauth/token",
+    cacheKey: (vars, context) =>
+      `${context.plugName}:${context.profile ?? "default"}:${vars["orgId"]}`,
+    buildTokenRequest: (vars, context) => ({
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: vars["clientId"]!,
+        client_secret: vars["clientSecret"]!,
+        org_id: vars["orgId"]!,
+        target: context.profile ?? "default",
+      }),
+    }),
+    parseTokenResponse: (data) => {
+      const value = data as { access_token: string; expires_in?: number };
+      return {
+        accessToken: value.access_token,
+        ...(value.expires_in !== undefined
+          ? { expiresIn: value.expires_in }
+          : {}),
+      };
+    },
+    tokenStore: tokenCacheStore({
+      get: async <T = unknown>(key: string) =>
+        (exampleTokenCache.get(key) as T | undefined) ?? null,
+      set: async <T = unknown>(key: string, value: T) => {
+        exampleTokenCache.set(key, value);
+        return value;
+      },
+      delete: async (key) => {
+        exampleTokenCache.delete(key);
+      },
+    }),
   }),
 });
 

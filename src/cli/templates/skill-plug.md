@@ -111,7 +111,7 @@ await api.paginate("/products", {
 | `apiKey(name, value)` | Custom header (default) or query param with `{ in: "query" }` |
 | `custom(fn)` | Full control: `(headers) => { headers.set(...) }` |
 | `hmacSignature(config)` | Signs with resolved `{ url, query, method, body, vars }` context |
-| `tokenExchange(config)` | OAuth-style: exchanges variables for bearer token, caches, optional `tokenStore`, auto-refreshes on 401 |
+| `tokenExchange(config)` | OAuth-style: exchanges variables/request context for bearer token, caches per key, optional durable `tokenStore`, auto-refreshes on 401 |
 | `authorizationCode(config)` | OAuth authorization-code strategy with optional PKCE and refresh-token support |
 
 `onUnauthorized` is part of an auth strategy, not `hooks`. The plug calls it
@@ -127,11 +127,15 @@ const auth = tokenExchange({
     clientSecret: process.env.OAUTH_CLIENT_SECRET!,
   }),
   tokenEndpoint: "/oauth/token",
-  buildTokenRequest: (vars) => ({
+  cacheKey: (vars, ctx) =>
+    `${ctx.plugName}:${ctx.profile ?? "default"}:${vars.orgId}`,
+  buildTokenRequest: (vars, ctx) => ({
     body: {
       grant_type: "client_credentials",
       client_id: vars.clientId,
       client_secret: vars.clientSecret,
+      org_id: vars.orgId,
+      target: ctx.profile ?? "default",
     },
   }),
   parseTokenResponse: (res) => ({
@@ -152,12 +156,16 @@ const auth = tokenExchange({
     clientSecret: process.env.OAUTH_CLIENT_SECRET!,
   }),
   tokenEndpoint: "/oauth/token",
-  buildTokenRequest: (vars) => ({
+  cacheKey: (vars, ctx) =>
+    `${ctx.plugName}:${ctx.profile ?? "default"}:${vars.orgId}`,
+  buildTokenRequest: (vars, ctx) => ({
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
       client_id: vars.clientId,
       client_secret: vars.clientSecret,
+      org_id: vars.orgId,
+      target: ctx.profile ?? "default",
     }),
   }),
   parseTokenResponse: (res) => ({
@@ -167,19 +175,39 @@ const auth = tokenExchange({
 });
 ```
 
-Use `tokenStore` when the token must survive cold starts. In a khotan app,
-back this with `khotanCache` or another durable store.
+Use `tokenStore` when the token must survive cold starts. Token stores receive
+the resolved cache key and request context, so one auth strategy can safely
+cache per org/profile. In a khotan app, adapt `khotanData.cache(...)` with
+`tokenCacheStore`.
+
+```typescript
+const oauthTokens = khotanData.cache("oauth-tokens");
+
+const auth = tokenExchange({
+  // ...
+  cacheKey: (vars, ctx) =>
+    `${ctx.plugName}:${ctx.profile ?? "default"}:${vars.orgId}`,
+  tokenStore: tokenCacheStore(oauthTokens, { prefix: "fresh:" }),
+});
+```
+
+`tokenStore` can also be implemented directly:
 
 ```typescript
 const auth = tokenExchange({
   // ...
   tokenStore: {
-    get: () => khotanCache.get("fresh:oauth-token"),
-    set: (token) => khotanCache.set("fresh:oauth-token", token),
-    clear: () => khotanCache.delete("fresh:oauth-token"),
+    get: (key) => oauthTokens.get(key ?? "default"),
+    set: (token, key) => oauthTokens.set(key ?? "default", token),
+    clear: (key) => oauthTokens.delete(key ?? "default"),
   },
 });
 ```
+
+`tokenExchange` resolves vars as `{ ...getVariables?.(), ...requestVars }`.
+Factory-bound request vars override env defaults. `buildTokenRequest`,
+`parseTokenResponse`, `extraHeaders`, `cacheKey`, and `tokenStore` receive the
+same request context (`url`, `method`, `body`, `plugName`, `profile/target`).
 
 ### HMAC Signature Example
 
@@ -242,6 +270,47 @@ export const myPlug = plug({
 ```
 
 Vars are encrypted in the database via `KHOTAN_SECRET` and injected per-request. Hidden vars (prefixed `_`) are internal storage (cached tokens, etc). `defaultValue` seeds the database the first time the plug is initialized, and later Hub/CLI edits override that stored value.
+
+### Var Profiles / Targets
+
+Register named profiles when credentials or base URLs differ by UAT/live,
+tenant, or organization:
+
+```typescript
+{
+  name: "packiyo",
+  plug: packiyoPlug,
+  profiles: {
+    uat: { vars: { baseUrl: "https://uat.packiyo.example" } },
+    live: { vars: { baseUrl: "https://api.packiyo.example" } },
+  },
+  defaultProfile: "live",
+}
+```
+
+Select a profile for a run:
+
+```typescript
+await khotanData.flow("products-relay", { plugName: "packiyo" }).start({
+  target: "uat", // alias for profile; applies to relay destination plugs too
+});
+```
+
+Inside durable workflows, bind another plug/profile explicitly:
+
+```typescript
+const uatFresh = bindWorkflowPlug(freshPlug, ctx, {
+  plugName: "fresh",
+  profile: "uat",
+});
+```
+
+Manage profile-specific vars through the existing CLI:
+
+```bash
+npx khotan-data plug vars packiyo set --profile uat --json '{"apiKey":"..."}'
+npx khotan-data plug vars packiyo show --target live
+```
 
 ## Typed Endpoints
 
@@ -400,6 +469,7 @@ Use the CLI to inspect and update stored plug variables:
 npx khotan-data plug vars --list
 npx khotan-data plug vars myPlug
 npx khotan-data plug vars myPlug set --json '{"apiKey":"secret","orgId":"org_live"}'
+npx khotan-data plug vars myPlug set --profile uat --json '{"apiKey":"secret","orgId":"org_uat"}'
 npx khotan-data plug vars myPlug clear
 ```
 

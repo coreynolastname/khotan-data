@@ -72,6 +72,10 @@ export interface AuthApplyContext<Vars = Record<string, string>> {
   method: string;
   body?: unknown;
   vars: Vars;
+  setVars(updates: Partial<Vars>): Promise<void>;
+  plugName?: string;
+  profile?: string;
+  target?: string;
 }
 
 export function bearer(
@@ -182,10 +186,15 @@ type VarsRecord<V extends readonly VarField[]> = Record<VarKeys<V>, string>;
 // ---------------------------------------------------------------------------
 
 export interface TokenExchangeConfig {
-  getVariables: () => Promise<Record<string, string>> | Record<string, string>;
+  getVariables?: () => Promise<Record<string, string>> | Record<string, string>;
   /** Full URL or path relative to the plug's baseUrl (e.g. "/token") */
-  tokenEndpoint: string;
-  buildTokenRequest: (vars: Record<string, string>) => {
+  tokenEndpoint:
+    | string
+    | ((vars: Record<string, string>, context: TokenExchangeContext) => string);
+  buildTokenRequest: (
+    vars: Record<string, string>,
+    context: TokenExchangeContext,
+  ) => {
     headers?: Record<string, string>;
     /**
      * Request body. A plain object is JSON-encoded with a default
@@ -197,17 +206,36 @@ export interface TokenExchangeConfig {
     body?: unknown;
     method?: string;
   };
-  parseTokenResponse: (data: unknown) => {
+  parseTokenResponse: (
+    data: unknown,
+    context: TokenExchangeContext,
+  ) => {
     accessToken: string;
     expiresIn?: number;
     expiresAt?: number;
     refreshToken?: string;
     tokenType?: string;
   };
-  extraHeaders?: (vars: Record<string, string>) => Record<string, string>;
+  extraHeaders?: (
+    vars: Record<string, string>,
+    context: TokenExchangeContext,
+  ) => Record<string, string>;
+  /**
+   * Cache key for memory and durable token stores. Defaults to a stable key
+   * derived from plug name, selected profile/target, and a short hash of vars.
+   * Prefer an explicit key using non-secret vars such as org/customer id.
+   */
+  cacheKey?:
+    | string
+    | ((vars: Record<string, string>, context: TokenExchangeContext) => string);
   refreshBufferSeconds?: number;
   tokenStore?: TokenStore;
 }
+
+export type TokenExchangeContext = AuthApplyContext<Record<string, string>> & {
+  cacheKey: string;
+  tokenEndpoint: string;
+};
 
 export interface StoredAuthToken {
   accessToken: string;
@@ -217,57 +245,173 @@ export interface StoredAuthToken {
 }
 
 export interface TokenStore {
-  get(): StoredAuthToken | null | Promise<StoredAuthToken | null>;
-  set(token: StoredAuthToken): void | Promise<void>;
-  clear?(): void | Promise<void>;
+  get(
+    key?: string,
+    context?: TokenExchangeContext,
+  ): StoredAuthToken | null | Promise<StoredAuthToken | null>;
+  set(
+    token: StoredAuthToken,
+    key?: string,
+    context?: TokenExchangeContext,
+  ): void | Promise<void>;
+  clear?(key?: string, context?: TokenExchangeContext): void | Promise<void>;
+}
+
+export interface TokenCacheLike {
+  get<T = unknown>(key: string): Promise<T | null>;
+  set<T = unknown>(key: string, value: T): Promise<T>;
+  delete(key: string): Promise<void>;
+}
+
+export function tokenCacheStore(
+  cache: TokenCacheLike,
+  options: { prefix?: string } = {},
+): TokenStore {
+  const prefix = options.prefix ?? "token:";
+  const keyFor = (key?: string) => `${prefix}${key ?? "default"}`;
+  return {
+    get: (key) => cache.get<StoredAuthToken>(keyFor(key)),
+    set: async (token, key) => {
+      await cache.set(keyFor(key), token);
+    },
+    clear: (key) => cache.delete(keyFor(key)),
+  };
 }
 
 export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
-  let cachedToken: string | null = null;
-  let tokenExpiresAt = 0;
+  const memoryTokens = new Map<string, StoredAuthToken>();
   let _baseUrl = "";
   const refreshBuffer = (config.refreshBufferSeconds ?? 60) * 1000;
 
-  function resolveEndpoint(): string {
-    const ep = config.tokenEndpoint;
+  function resolveEndpoint(
+    vars: Record<string, string>,
+    context: AuthApplyContext<Record<string, string>>,
+  ): string {
+    const ep =
+      typeof config.tokenEndpoint === "function"
+        ? config.tokenEndpoint(vars, context as TokenExchangeContext)
+        : config.tokenEndpoint;
     if (ep.startsWith("http://") || ep.startsWith("https://")) return ep;
     return `${_baseUrl.replace(/\/$/, "")}${ep.startsWith("/") ? "" : "/"}${ep}`;
   }
 
-  function isExpired(): boolean {
-    if (!cachedToken) return true;
-    if (tokenExpiresAt === 0) return false;
-    return Date.now() >= tokenExpiresAt - refreshBuffer;
+  function stableStringify(value: unknown): string {
+    if (value === null || typeof value !== "object") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableStringify(
+            (value as Record<string, unknown>)[key],
+          )}`,
+      )
+      .join(",")}}`;
   }
 
-  function cacheToken(token: StoredAuthToken) {
-    cachedToken = token.accessToken;
-    tokenExpiresAt = token.expiresAt ?? 0;
+  function shortHash(input: string): string {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
   }
 
-  async function loadStoredToken(): Promise<boolean> {
-    if (!config.tokenStore) return false;
-    const stored = await config.tokenStore.get();
-    if (!stored?.accessToken) return false;
-    cacheToken(stored);
+  function isExpired(token: StoredAuthToken | null | undefined): boolean {
+    if (!token?.accessToken) return true;
+    if (token.expiresAt === undefined) return false;
+    return Date.now() >= token.expiresAt - refreshBuffer;
+  }
+
+  async function resolveVars(
+    requestVars?: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    return {
+      ...((await config.getVariables?.()) ?? {}),
+      ...(requestVars ?? {}),
+    };
+  }
+
+  function resolveCacheKey(
+    vars: Record<string, string>,
+    context: AuthApplyContext<Record<string, string>>,
+  ): string {
+    if (typeof config.cacheKey === "string") return config.cacheKey;
+    if (typeof config.cacheKey === "function") {
+      return config.cacheKey(vars, context as TokenExchangeContext);
+    }
+    return [
+      "token-exchange",
+      context.plugName ?? "plug",
+      context.profile ?? context.target ?? "default",
+      shortHash(stableStringify(vars)),
+    ].join(":");
+  }
+
+  async function buildContext(
+    requestVars?: Record<string, string>,
+    requestContext?: AuthApplyContext,
+  ): Promise<TokenExchangeContext> {
+    const vars = await resolveVars(requestVars);
+    const baseContext: AuthApplyContext<Record<string, string>> = {
+      url: requestContext?.url ?? "",
+      query: requestContext?.query ?? "",
+      searchParams: requestContext?.searchParams ?? new URLSearchParams(),
+      method: requestContext?.method ?? "GET",
+      body: requestContext?.body,
+      vars,
+      setVars:
+        requestContext?.setVars ??
+        (async (_updates: Partial<Record<string, string>>) => {}),
+      plugName: requestContext?.plugName,
+      profile: requestContext?.profile,
+      target: requestContext?.target ?? requestContext?.profile,
+    };
+    const seedContext = {
+      ...baseContext,
+      tokenEndpoint: "",
+      cacheKey: "",
+    } as TokenExchangeContext;
+    const tokenEndpoint = resolveEndpoint(vars, seedContext);
+    const cacheKey = resolveCacheKey(vars, {
+      ...baseContext,
+      tokenEndpoint,
+      cacheKey: "",
+    } as TokenExchangeContext);
+    return { ...baseContext, tokenEndpoint, cacheKey };
+  }
+
+  async function loadStoredToken(
+    context: TokenExchangeContext,
+  ): Promise<StoredAuthToken | null> {
+    if (!config.tokenStore) return null;
+    const stored = await config.tokenStore.get(context.cacheKey, context);
+    if (!stored?.accessToken) return null;
+    memoryTokens.set(context.cacheKey, stored);
     kd("auth", "tokenExchange: loaded token from tokenStore");
-    return !isExpired();
+    return isExpired(stored) ? null : stored;
   }
 
-  async function clearToken() {
-    cachedToken = null;
-    tokenExpiresAt = 0;
-    await config.tokenStore?.clear?.();
+  async function clearToken(context: TokenExchangeContext) {
+    memoryTokens.delete(context.cacheKey);
+    await config.tokenStore?.clear?.(context.cacheKey, context);
   }
 
-  async function fetchToken(): Promise<string> {
-    const vars = await config.getVariables();
+  async function fetchToken(
+    context: TokenExchangeContext,
+  ): Promise<StoredAuthToken> {
+    const vars = context.vars;
     kd(
       "auth",
       "tokenExchange: fetching token, has variables:",
       Object.keys(vars).join(", "),
     );
-    const reqConfig = config.buildTokenRequest(vars);
+    const reqConfig = config.buildTokenRequest(vars, context);
 
     const headers = new Headers(reqConfig.headers);
     // Send a pre-encoded body (string / URLSearchParams) verbatim and honor the
@@ -289,8 +433,7 @@ export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
       }
     }
 
-    const endpoint = resolveEndpoint();
-    kd("auth", "tokenExchange: POST", endpoint);
+    kd("auth", "tokenExchange: POST", context.tokenEndpoint);
     const init: RequestInit = {
       method: reqConfig.method ?? "POST",
       headers,
@@ -298,7 +441,7 @@ export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
     if (tokenBody !== undefined) {
       init.body = tokenBody;
     }
-    const res = await fetch(endpoint, init);
+    const res = await fetch(context.tokenEndpoint, init);
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -308,7 +451,7 @@ export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
         res.status,
         res.statusText,
         body,
-        endpoint,
+        context.tokenEndpoint,
         reqConfig.method ?? "POST",
       );
     }
@@ -319,7 +462,7 @@ export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
       "tokenExchange: raw response keys:",
       Object.keys(data as object),
     );
-    const parsed = config.parseTokenResponse(data);
+    const parsed = config.parseTokenResponse(data, context);
     if (!parsed.accessToken) {
       kd(
         "auth",
@@ -342,46 +485,54 @@ export function tokenExchange(config: TokenExchangeConfig): AuthStrategy {
     if (parsed.tokenType !== undefined) {
       token.tokenType = parsed.tokenType;
     }
-    cacheToken(token);
-    await config.tokenStore?.set(token);
+    memoryTokens.set(context.cacheKey, token);
+    await config.tokenStore?.set(token, context.cacheKey, context);
     kd(
       "auth",
       "tokenExchange: got token, expires in",
       parsed.expiresIn ?? "unknown",
       "seconds",
     );
-    return token.accessToken;
+    return token;
   }
 
   return {
     type: "tokenExchange",
-    async apply(headers: Headers) {
-      if (isExpired()) {
-        const loaded = await loadStoredToken();
-        if (!loaded) {
+    async apply(headers: Headers, vars, requestContext) {
+      const context = await buildContext(vars, requestContext);
+      let token = memoryTokens.get(context.cacheKey) ?? null;
+      if (isExpired(token)) {
+        token = await loadStoredToken(context);
+        if (!token) {
           kd("auth", "tokenExchange: token expired or missing, refreshing");
-          await fetchToken();
+          token = await fetchToken(context);
         }
       }
-      headers.set("Authorization", `Bearer ${cachedToken}`);
+      if (!token) {
+        throw new Error("Token exchange did not produce an access token");
+      }
+      headers.set(
+        "Authorization",
+        `${token.tokenType ?? "Bearer"} ${token.accessToken}`,
+      );
       kd(
         "auth",
         "tokenExchange: applied bearer token",
-        cachedToken ? `${cachedToken.slice(0, 8)}...` : "MISSING",
+        token.accessToken ? `${token.accessToken.slice(0, 8)}...` : "MISSING",
       );
 
       if (config.extraHeaders) {
-        const vars = await config.getVariables();
-        const extra = config.extraHeaders(vars);
+        const extra = config.extraHeaders(context.vars, context);
         for (const [key, value] of Object.entries(extra)) {
           headers.set(key, value);
           kd("auth", "tokenExchange: set extra header", key);
         }
       }
     },
-    async onUnauthorized() {
+    async onUnauthorized(vars, requestContext) {
+      const context = await buildContext(vars, requestContext);
       kd("auth", "tokenExchange: 401 received, clearing cached token");
-      await clearToken();
+      await clearToken(context);
     },
     set baseUrl(url: string) {
       _baseUrl = url;
@@ -1071,6 +1222,12 @@ export interface RequestOptions {
   vars?: Record<string, string>;
   /** Function to persist var updates back to encrypted storage */
   _setVars?: (updates: Record<string, string>) => Promise<void>;
+  /** Bound plug name, injected by the Khotan factory when available. */
+  plugName?: string;
+  /** Named variable profile for this request, e.g. "uat" or "live". */
+  profile?: string;
+  /** Alias for `profile` for teams that use target terminology. */
+  target?: string;
   /** @internal Skip hooks for this request (used to prevent recursion in beforeRequest) */
   _skipHooks?: boolean;
 }
@@ -1390,6 +1547,13 @@ export class Plug<V extends readonly VarField[] = VarField[]> {
       method,
       body: options?.body,
       vars: (options?.vars ?? {}) as VarsRecord<V>,
+      setVars: (updates) =>
+        (options?._setVars ?? (async () => {}))(
+          updates as Record<string, string>,
+        ),
+      plugName: options?.plugName ?? this.name,
+      profile: options?.profile,
+      target: options?.target ?? options?.profile,
     };
   }
 

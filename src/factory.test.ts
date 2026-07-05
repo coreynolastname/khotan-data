@@ -827,6 +827,75 @@ describe("bindWorkflowPlug", () => {
     expect(ctx.plugVarsByName["pollinate"]).toEqual({ _token: "token-1" });
   });
 
+  it("binds profile-scoped workflow vars and keeps updates on that profile", async () => {
+    const post = vi.fn(
+      async (_path: string, options?: Record<string, unknown>) => {
+        const setVars = options?.["_setVars"] as
+          | ((updates: Record<string, string>) => Promise<void>)
+          | undefined;
+        await setVars?.({ _token: "uat-token" });
+        return { ok: true };
+      },
+    );
+    const plug = {
+      get: vi.fn(),
+      post,
+      put: vi.fn(),
+      patch: vi.fn(),
+      delete: vi.fn(),
+    };
+    const ctx = {
+      flow: {
+        id: "flow-1",
+        name: "relay-products",
+        plugName: "cin7",
+        type: "relay" as const,
+        resource: "products",
+        to: "pollinate",
+      },
+      variant: "full",
+      profile: "live",
+      target: "live",
+      vars: { apiKey: "cin7-live" },
+      plugVarsByName: {
+        pollinate: { apiKey: "pollinate-live" },
+      },
+      plugProfilesByName: {
+        pollinate: "live",
+      },
+      plugVarProfilesByName: {
+        pollinate: {
+          live: { apiKey: "pollinate-live" },
+          uat: { apiKey: "pollinate-uat" },
+        },
+      },
+      khotanRunId: "run-1",
+      khotanInstanceId: "instance-1",
+    };
+
+    const boundPlug = bindWorkflowPlug(plug, ctx, {
+      plugName: "pollinate",
+      profile: "uat",
+    });
+    await boundPlug.post("/products", { body: { name: "One" } });
+
+    expect(post).toHaveBeenCalledWith(
+      "/products",
+      expect.objectContaining({
+        profile: "uat",
+        target: "uat",
+        vars: { apiKey: "pollinate-uat", _token: "uat-token" },
+      }),
+    );
+    expect(ctx.plugVarProfilesByName.pollinate.uat).toEqual({
+      apiKey: "pollinate-uat",
+      _token: "uat-token",
+    });
+    expect(ctx.plugVarProfilesByName.pollinate.live).toEqual({
+      apiKey: "pollinate-live",
+    });
+  });
+
   it("batchPost falls back to bound post calls when the plug has no native batchPost", async () => {
     const post = vi.fn(
       async (_path: string, options?: Record<string, unknown>) => ({
@@ -2425,6 +2494,134 @@ describe("khotan factory", () => {
           plugVarsByName: {
             cin7: { username: "cin7-user" },
             pollinate: { username: "pollinate-user" },
+          },
+        }),
+      ]);
+    });
+
+    it("POST /api/khotan/flows/:id/runs selects profile vars for source and destination plugs", async () => {
+      const workflow = vi.fn(async () => undefined);
+      const returnValue = Promise.resolve(undefined);
+      const startWorkflow = vi.fn(async () => ({
+        runId: "workflow-run-1",
+        returnValue,
+      }));
+      __setWorkflowStartForTests(startWorkflow);
+
+      const flowInstance = khotanOpen({
+        adapter,
+        secret: "test-secret",
+        plugs: [
+          {
+            name: "packiyo",
+            profiles: {
+              uat: { vars: { baseUrl: "https://uat.packiyo.example" } },
+              live: { vars: { baseUrl: "https://live.packiyo.example" } },
+            },
+            plug: {
+              baseUrl: "https://api.packiyo.example",
+              authType: "bearer",
+              varFields: [
+                { key: "baseUrl", label: "Base URL", type: "url" },
+                { key: "apiKey", label: "API Key", type: "password" },
+              ],
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [
+              {
+                name: "products-relay",
+                type: "relay",
+                to: "fresh",
+                workflow,
+              },
+            ],
+          },
+          {
+            name: "fresh",
+            targets: {
+              uat: { vars: { orgId: "fresh-uat" } },
+              live: { vars: { orgId: "fresh-live" } },
+            },
+            plug: {
+              baseUrl: "https://fresh.example",
+              authType: "bearer",
+              varFields: [
+                { key: "orgId", label: "Org ID", type: "text" },
+                { key: "apiKey", label: "API Key", type: "password" },
+              ],
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.setVars("packiyo", { apiKey: "packiyo-live" });
+      await flowInstance.setVars(
+        "packiyo",
+        { apiKey: "packiyo-uat" },
+        { profile: "uat" },
+      );
+      await flowInstance.setVars("fresh", { apiKey: "fresh-live" });
+      await flowInstance.setVars(
+        "fresh",
+        { apiKey: "fresh-uat" },
+        { target: "uat" },
+      );
+
+      const res = await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST", {
+          target: "uat",
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        profile: "uat",
+      });
+      expect(startWorkflow).toHaveBeenCalledWith(workflow, [
+        expect.objectContaining({
+          profile: "uat",
+          target: "uat",
+          vars: {
+            baseUrl: "https://uat.packiyo.example",
+            apiKey: "packiyo-uat",
+          },
+          plugProfilesByName: {
+            packiyo: "uat",
+            fresh: "uat",
+          },
+          plugVarsByName: {
+            packiyo: {
+              baseUrl: "https://uat.packiyo.example",
+              apiKey: "packiyo-uat",
+            },
+            fresh: {
+              orgId: "fresh-uat",
+              apiKey: "fresh-uat",
+            },
+          },
+          plugVarProfilesByName: {
+            packiyo: {
+              uat: {
+                baseUrl: "https://uat.packiyo.example",
+                apiKey: "packiyo-uat",
+              },
+            },
+            fresh: {
+              uat: {
+                orgId: "fresh-uat",
+                apiKey: "fresh-uat",
+              },
+            },
           },
         }),
       ]);
@@ -5803,6 +6000,87 @@ describe("debug route", () => {
     expect(data.values).toMatchObject({
       apiKey: "••••••••",
       orgId: "new-org",
+    });
+  });
+
+  it("stores and reads plug variables by named profile", async () => {
+    const instance = khotanOpen({
+      adapter,
+      secret: "test-secret",
+      plugs: [
+        {
+          name: "packiyo",
+          profiles: {
+            uat: { label: "UAT", vars: { baseUrl: "https://uat.example" } },
+            live: {
+              label: "Live",
+              vars: { baseUrl: "https://live.example" },
+            },
+          },
+          defaultProfile: "live",
+          plug: {
+            baseUrl: "https://api.packiyo.example",
+            authType: "bearer",
+            varFields: [
+              { key: "baseUrl", label: "Base URL", type: "url" },
+              {
+                key: "apiKey",
+                label: "API Key",
+                type: "password",
+                secret: true,
+              },
+            ],
+            get: vi.fn(),
+            post: vi.fn(),
+            put: vi.fn(),
+            patch: vi.fn(),
+            delete: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    await instance.init();
+    await instance.setVars("packiyo", { apiKey: "live-key" });
+
+    const saveUat = await instance.handler(
+      makeRequest("/api/khotan/variables/packiyo?profile=uat", "POST", {
+        apiKey: "uat-key",
+      }),
+    );
+    expect(saveUat.status).toBe(200);
+    await expect(saveUat.json()).resolves.toMatchObject({
+      ok: true,
+      profile: "uat",
+    });
+
+    await expect(instance.getVars("packiyo")).resolves.toEqual({
+      baseUrl: "https://live.example",
+      apiKey: "live-key",
+    });
+    await expect(
+      instance.getVars("packiyo", { profile: "uat" }),
+    ).resolves.toEqual({
+      baseUrl: "https://uat.example",
+      apiKey: "uat-key",
+    });
+
+    const res = await instance.handler(
+      makeRequest("/api/khotan/variables/packiyo?target=uat"),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toMatchObject({
+      configured: true,
+      profile: "uat",
+      values: {
+        baseUrl: "https://uat.example",
+        apiKey: "••••••••",
+      },
+      profiles: [
+        { name: "live", label: "Live", configured: true, default: true },
+        { name: "uat", label: "UAT", configured: true, default: false },
+      ],
     });
   });
 
