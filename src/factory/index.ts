@@ -59,6 +59,7 @@ export type {
   PlugRegistration,
   KhotanAdapter,
   KhotanAuthorize,
+  KhotanVercelConfig,
   KhotanConfig,
   KhotanHandler,
   WireInstance,

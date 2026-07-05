@@ -2135,7 +2135,7 @@ describe("CLI", { timeout: 30_000 }, () => {
       );
       const uiDir = path.join(tmpDir, "components", "ui");
       fs.mkdirSync(uiDir, { recursive: true });
-      for (const c of ["card", "table", "badge", "button"]) {
+      for (const c of ["card", "table", "badge", "button", "switch"]) {
         fs.writeFileSync(path.join(uiDir, `${c}.tsx`), "");
       }
 

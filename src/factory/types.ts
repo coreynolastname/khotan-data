@@ -860,12 +860,28 @@ export interface KhotanAdapter {
  */
 export type KhotanAuthorize = (request: Request) => boolean | Promise<boolean>;
 
+export interface KhotanVercelConfig {
+  /**
+   * Public deployment URL shown in generated logs details. If omitted, khotan
+   * falls back to VERCEL_PROJECT_PRODUCTION_URL or VERCEL_URL when available.
+   */
+  deploymentUrl?: string;
+  /**
+   * Base URL or URL template for Vercel Workflow run details. If the string
+   * contains `{workflowRunId}`, that token is replaced with the encoded ID;
+   * otherwise the encoded ID is appended as the final path segment.
+   */
+  workflowRunBaseUrl?: string;
+}
+
 export interface KhotanConfig {
   adapter: KhotanAdapter;
   plugs: PlugRegistration[];
   resources?: ResourceRegistration[];
   caches?: CacheRegistration[];
   secret?: string;
+  /** Optional links surfaced by generated operational log UIs. */
+  vercel?: KhotanVercelConfig;
   /**
    * Gate every management route (plugs, variables, flows, runs, wires,
    * mappings, caches, resources, webhook handlers/events) behind a custom
