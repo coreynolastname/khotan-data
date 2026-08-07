@@ -1,5 +1,46 @@
 # khotan-data
 
+## 0.12.0
+
+### Minor Changes
+
+- Fix runs left at `running` forever when a flow is aborted or outlives its trigger.
+
+  For workflow-backed flows the terminal status was written only by an observer
+  bound to the triggering HTTP invocation (`waitUntil`). A workflow run routinely
+  outlives that invocation, so for any run longer than the function budget nothing
+  ever recorded the outcome: the row stayed `status = 'running'` with `completed_at`
+  null and all counters at `0`, whether the engine had recorded the run as
+  completed or as failed.
+
+  Stuck-run reconciliation now asks the execution engine what actually happened
+  before deciding anything:
+  - Runs the engine reports as terminal adopt that real status, and completed runs
+    recover their counters and metadata from the workflow return value.
+  - Runs the engine still reports as in-flight are left untouched and counted as
+    `inFlight`, so a legitimately long run is no longer force-marked terminal.
+  - Only when the engine cannot be reached does reconciliation fall back to a
+    time-based sweep.
+
+  Breaking changes:
+  - The fallback status is now `abandoned` instead of `failed`. A stuck row maps to
+    engine-completed runs as often as engine-failed ones, so `failed` asserted
+    something untrue. Pass `status: "failed"` to restore the old behavior.
+  - `RunSummary.status` and `StuckRunReconcileItem.status` widen to include
+    `abandoned`, which can break exhaustive `switch` statements.
+
+  Also:
+  - Adds the `abandoned` run status. `khotan_runs.status` and
+    `khotan_flows.last_run_status` are plain text columns, so no migration is
+    required.
+  - Adds `reconcileFromEngine` (default `true`) to opt out of engine lookups, plus
+    `inFlight` on the result and `statusSource` / `engineStatus` on each item so
+    callers can tell a recovered status from an inferred one.
+  - `sendUpdate` no longer fails silently. Calling it without a run context logged
+    nothing and persisted nothing; it now reports that under `KHOTAN_DEBUG`, and a
+    failure to reach the runtime registry degrades loudly instead of throwing into
+    user flow code where wrappers typically swallow it.
+
 ## 0.11.0
 
 ### Minor Changes

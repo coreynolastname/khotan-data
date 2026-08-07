@@ -1,4 +1,5 @@
 import { khotanRuntimeRegistry } from "./types.js";
+import { kd } from "./debug.js";
 import type {
   KhotanPersistedRunUpdateInput,
   KhotanRunUpdate,
@@ -233,9 +234,28 @@ async function persistRunUpdate(
   ctx: KhotanWorkflowContextRef | undefined,
   update: KhotanPersistedRunUpdateInput,
 ): Promise<void> {
-  if (!ctx?.khotanRunId) return;
-  const helpers = getRuntimeHelpers(ctx);
-  await helpers.appendRunUpdate(update);
+  // Without a run context there is nothing to attach the update to. This used
+  // to return silently, which made `sendUpdate(update)` — the natural call
+  // shape — a no-op that looked like it worked. Say so instead.
+  if (!ctx?.khotanRunId) {
+    kd(
+      "flow",
+      "sendUpdate called without a run context; the update was streamed but " +
+        "not persisted to khotan_run_updates. Pass the workflow ctx as the " +
+        "first argument, or set options.runId, to persist it.",
+    );
+    return;
+  }
+
+  // A throw here escapes into user flow code, where wrappers routinely swallow
+  // it. Persisting an update is best-effort, so degrade loudly but don't fail
+  // the step.
+  try {
+    const helpers = getRuntimeHelpers(ctx);
+    await helpers.appendRunUpdate(update);
+  } catch (error) {
+    kd("flow", "Failed to persist run update", error);
+  }
 }
 
 export function sendUpdate(
