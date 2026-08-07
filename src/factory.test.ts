@@ -2192,6 +2192,13 @@ describe("khotan factory", () => {
         type: "relay",
         plugName: "fresh-uat",
         to: "invoice-agent",
+        destinationPlugs: [
+          {
+            name: "invoice-agent",
+            plugName: "invoice-agent",
+            plugId: "plug-2",
+          },
+        ],
         destinationPlugId: "plug-2",
         destinationPlugName: "invoice-agent",
       });
@@ -2207,6 +2214,98 @@ describe("khotan factory", () => {
       expect(destinationData.flows[0]).toMatchObject({
         name: "fresh-products-relay",
         destinationPlugId: "plug-2",
+      });
+    });
+
+    it("surfaces fan-out relay flows on every destination plug", async () => {
+      const relayInstance = khotanOpen({
+        adapter,
+        plugs: [
+          {
+            name: "fresh-uat",
+            plug: { baseUrl: "https://fresh.example", authType: "bearer" },
+            flows: [
+              {
+                name: "fresh-products-relay",
+                type: "relay",
+                to: ["invoice-agent", "analytics"],
+              },
+            ],
+          },
+          {
+            name: "invoice-agent",
+            plug: { baseUrl: "https://invoice.example", authType: "bearer" },
+          },
+          {
+            name: "analytics",
+            plug: { baseUrl: "https://analytics.example", authType: "bearer" },
+          },
+        ],
+      });
+
+      await relayInstance.init();
+
+      const plugsRes = await relayInstance.handler(
+        makeRequest("/api/khotan/plugs"),
+      );
+      expect(plugsRes.status).toBe(200);
+      const plugsData = (await plugsRes.json()) as Record<string, unknown>[];
+      expect(
+        plugsData.find((plug) => plug["name"] === "fresh-uat"),
+      ).toMatchObject({ flowCount: 1 });
+      expect(
+        plugsData.find((plug) => plug["name"] === "invoice-agent"),
+      ).toMatchObject({ flowCount: 1 });
+      expect(
+        plugsData.find((plug) => plug["name"] === "analytics"),
+      ).toMatchObject({ flowCount: 1 });
+
+      const flowsRes = await relayInstance.handler(
+        makeRequest("/api/khotan/flows"),
+      );
+      expect(flowsRes.status).toBe(200);
+      const flowsData = (await flowsRes.json()) as Record<string, unknown>[];
+      expect(flowsData[0]).toMatchObject({
+        name: "fresh-products-relay",
+        type: "relay",
+        plugName: "fresh-uat",
+        to: ["invoice-agent", "analytics"],
+        destinationPlugId: "plug-2",
+        destinationPlugName: "invoice-agent",
+        destinationPlugs: [
+          {
+            name: "invoice-agent",
+            plugName: "invoice-agent",
+            plugId: "plug-2",
+          },
+          {
+            name: "analytics",
+            plugName: "analytics",
+            plugId: "plug-3",
+          },
+        ],
+      });
+
+      const analyticsRes = await relayInstance.handler(
+        makeRequest("/api/khotan/plugs/plug-3"),
+      );
+      expect(analyticsRes.status).toBe(200);
+      const analyticsData = (await analyticsRes.json()) as {
+        flows: Record<string, unknown>[];
+      };
+      expect(analyticsData.flows).toHaveLength(1);
+      expect(analyticsData.flows[0]).toMatchObject({
+        name: "fresh-products-relay",
+        destinationPlugs: [
+          expect.objectContaining({
+            name: "invoice-agent",
+            plugId: "plug-2",
+          }),
+          expect.objectContaining({
+            name: "analytics",
+            plugId: "plug-3",
+          }),
+        ],
       });
     });
 
@@ -3055,6 +3154,222 @@ describe("khotan factory", () => {
           },
         }),
       ]);
+    });
+
+    it("POST /api/khotan/flows/:id/runs includes all fan-out relay destination vars", async () => {
+      const workflow = vi.fn(async () => undefined);
+      const returnValue = Promise.resolve(undefined);
+      const startWorkflow = vi.fn(async () => ({
+        runId: "workflow-run-1",
+        returnValue,
+      }));
+      __setWorkflowStartForTests(startWorkflow);
+
+      const flowInstance = khotanOpen({
+        adapter,
+        secret: "test-secret",
+        plugs: [
+          {
+            name: "cin7",
+            plug: {
+              baseUrl: "https://api.cin7.com",
+              authType: "basic",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [
+              {
+                name: "products-relay",
+                type: "relay",
+                to: ["pollinate", "invoice-agent"],
+                workflow,
+              },
+            ],
+          },
+          {
+            name: "pollinate",
+            plug: {
+              baseUrl: "https://api.pollinate.tech",
+              authType: "custom",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+          {
+            name: "invoice-agent",
+            plug: {
+              baseUrl: "https://invoice.example",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.setVars("cin7", { username: "cin7-user" });
+      await flowInstance.setVars("pollinate", { username: "pollinate-user" });
+      await flowInstance.setVars("invoice-agent", {
+        token: "invoice-agent-token",
+      });
+
+      const res = await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST", {
+          variant: "full",
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(startWorkflow).toHaveBeenCalledWith(workflow, [
+        expect.objectContaining({
+          khotanInstanceId: expect.any(String),
+          flow: expect.objectContaining({
+            id: "flow-1",
+            plugName: "cin7",
+            to: ["pollinate", "invoice-agent"],
+            destinations: [
+              { name: "pollinate", plugName: "pollinate" },
+              { name: "invoice-agent", plugName: "invoice-agent" },
+            ],
+          }),
+          vars: { username: "cin7-user" },
+          plugVarsByName: {
+            cin7: { username: "cin7-user" },
+            pollinate: { username: "pollinate-user" },
+            "invoice-agent": { token: "invoice-agent-token" },
+          },
+          destinations: [
+            {
+              name: "pollinate",
+              plugName: "pollinate",
+              vars: { username: "pollinate-user" },
+            },
+            {
+              name: "invoice-agent",
+              plugName: "invoice-agent",
+              vars: { token: "invoice-agent-token" },
+            },
+          ],
+        }),
+      ]);
+    });
+
+    it("POST /api/khotan/flows/:id/runs includes fan-out destinations for inline relay runs", async () => {
+      let capturedCtx: Record<string, unknown> | undefined;
+      const run = vi.fn(async (ctx) => {
+        capturedCtx = ctx as Record<string, unknown>;
+        return {
+          created: Array.isArray(ctx.destinations)
+            ? ctx.destinations.length
+            : 0,
+        };
+      });
+
+      const flowInstance = khotanOpen({
+        adapter,
+        secret: "test-secret",
+        plugs: [
+          {
+            name: "cin7",
+            plug: {
+              baseUrl: "https://api.cin7.com",
+              authType: "basic",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [
+              {
+                name: "products-relay",
+                type: "relay",
+                to: ["pollinate", "invoice-agent"],
+                run,
+              },
+            ],
+          },
+          {
+            name: "pollinate",
+            plug: {
+              baseUrl: "https://api.pollinate.tech",
+              authType: "custom",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+          {
+            name: "invoice-agent",
+            plug: {
+              baseUrl: "https://invoice.example",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.setVars("cin7", { username: "cin7-user" });
+      await flowInstance.setVars("pollinate", { username: "pollinate-user" });
+      await flowInstance.setVars("invoice-agent", {
+        token: "invoice-agent-token",
+      });
+
+      const res = await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST", {
+          variant: "full",
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        id: "run-1",
+        status: "completed",
+        created: 2,
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(capturedCtx).toMatchObject({
+        flow: {
+          id: "flow-1",
+          plugName: "cin7",
+          to: ["pollinate", "invoice-agent"],
+          destinations: [
+            { name: "pollinate", plugName: "pollinate" },
+            { name: "invoice-agent", plugName: "invoice-agent" },
+          ],
+        },
+        vars: { username: "cin7-user" },
+        destinations: [
+          {
+            name: "pollinate",
+            plugName: "pollinate",
+            vars: { username: "pollinate-user" },
+          },
+          {
+            name: "invoice-agent",
+            plugName: "invoice-agent",
+            vars: { token: "invoice-agent-token" },
+          },
+        ],
+      });
     });
 
     it("POST /api/khotan/flows/:id/runs selects profile vars for source and destination plugs", async () => {
@@ -7551,6 +7866,11 @@ describe("factory scaffold builders", () => {
       to: "hubspot",
       workflow: relayWorkflow,
     });
+    const fanoutRelayRegistration = relay({
+      name: "products-fanout",
+      to: ["hubspot", "slack"],
+      workflow: relayWorkflow,
+    });
 
     expect(inflowRegistration).toMatchObject({
       name: "products-in",
@@ -7568,6 +7888,11 @@ describe("factory scaffold builders", () => {
       name: "products-relay",
       type: "relay",
       to: "hubspot",
+    });
+    expect(fanoutRelayRegistration).toMatchObject({
+      name: "products-fanout",
+      type: "relay",
+      to: ["hubspot", "slack"],
     });
     expect(inflowRegistration.workflow).toBe(inflowWorkflow);
     expect(outflowRegistration.workflow).toBe(outflowWorkflow);

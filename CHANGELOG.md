@@ -1,5 +1,12 @@
 # khotan-data
 
+## 0.11.0
+
+### Minor Changes
+
+- Add fan-out relay destination support. Relays can now declare multiple destination plugs with `to: [...]`, and workflow contexts include destination refs and selected destination vars for each target.
+- ff336a4: Add shared database package output options for `khotan-data generate`, including explicit schema files, schema barrels, Drizzle config targets, migrations output, and shared runtime validation hints.
+
 ## 0.10.0
 
 ### Minor Changes

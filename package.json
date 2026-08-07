@@ -1,13 +1,13 @@
 {
   "name": "khotan-data",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Data sync, ETL, and webhook primitives for Next.js + Drizzle + Postgres. shadcn for data plumbing.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "khotan-data": "./dist/cli.js"
+    "khotan-data": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -145,7 +145,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/khotan-io/khotan-data"
+    "url": "git+https://github.com/khotan-io/khotan-data.git"
   },
   "engines": {
     "node": ">=18"

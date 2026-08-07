@@ -57,7 +57,12 @@ interface Flow {
     | "cancelled"
     | null;
   plugName: string | null;
-  to?: string | null;
+  to?: string | string[] | null;
+  destinationPlugs?: Array<{
+    name: string;
+    plugName: string;
+    plugId: string | null;
+  }>;
   destinationPlugId?: string | null;
   destinationPlugName?: string | null;
 }
@@ -107,6 +112,32 @@ const runStatusVariant: Record<string, StatusVariant> = {
   failed: "destructive",
   cancelled: "outline",
 };
+
+function getRelayDestinationNames(flow: Flow) {
+  if (flow.destinationPlugs?.length) {
+    return flow.destinationPlugs.map((destination) => destination.name);
+  }
+  if (Array.isArray(flow.to)) return flow.to;
+  if (flow.destinationPlugName) return [flow.destinationPlugName];
+  if (typeof flow.to === "string") return [flow.to];
+  return [];
+}
+
+function isRelayAssociatedWithPlug(flow: Flow, plugId: string) {
+  return (
+    flow.destinationPlugId === plugId ||
+    flow.destinationPlugs?.some(
+      (destination) => destination.plugId === plugId,
+    ) === true
+  );
+}
+
+function formatRelayDestinationLabel(flow: Flow) {
+  const destinations = getRelayDestinationNames(flow);
+  if (destinations.length === 0) return "registered here";
+  if (destinations.length === 1) return `to ${destinations[0]}`;
+  return `to ${destinations.join(", ")}`;
+}
 
 export function KhotanHub({
   webhookUrl,
@@ -270,7 +301,8 @@ export function KhotanHub({
     ? flows.filter(
         (flow) =>
           flow.plugId === selectedPlugId ||
-          (flow.type === "relay" && flow.destinationPlugId === selectedPlugId),
+          (flow.type === "relay" &&
+            isRelayAssociatedWithPlug(flow, selectedPlugId)),
       )
     : [];
 
@@ -404,9 +436,7 @@ export function KhotanHub({
                         </TableCell>
                         <TableCell className="text-muted-foreground">
                           {flow.plugId === selectedPlug.id
-                            ? flow.destinationPlugName
-                              ? `to ${flow.destinationPlugName}`
-                              : "registered here"
+                            ? formatRelayDestinationLabel(flow)
                             : `from ${flow.plugName ?? "source"}`}
                         </TableCell>
                         <TableCell className="text-muted-foreground">

@@ -22,6 +22,18 @@ export interface ResourceRegistration {
 }
 
 export type FlowType = "inflow" | "outflow" | "relay" | "webhook";
+export type RelayDestinationConfig = string | readonly string[];
+
+export interface RelayDestinationRef {
+  name: string;
+  plugName: string;
+}
+
+export interface RelayDestinationContext extends RelayDestinationRef {
+  vars: Record<string, string>;
+  profile?: string;
+  target?: string;
+}
 
 export type KhotanRunStatus =
   | "pending"
@@ -233,7 +245,8 @@ export interface FlowHookContext {
     plugName: string;
     type: FlowType;
     resource?: string | null;
-    to?: string | null;
+    to?: RelayDestinationConfig | null;
+    destinations?: RelayDestinationRef[];
   };
   /** The active variant for the finished run. */
   variant: string;
@@ -310,8 +323,10 @@ export interface FlowRunContext<TBody = unknown> {
     plugName: string;
     type: FlowType;
     resource?: string | null;
-    to?: string | null;
+    to?: RelayDestinationConfig | null;
+    destinations?: RelayDestinationRef[];
   };
+  destinations?: RelayDestinationContext[];
   /** The active variant for this run. The variant name is the run mode — flow
    *  code branches on this (e.g. "default", "delta", "full", "healthcheck"). */
   variant: string;
@@ -340,7 +355,8 @@ export interface FlowWorkflowContext<TBody = unknown> {
     plugName: string;
     type: FlowType;
     resource?: string | null;
-    to?: string | null;
+    to?: RelayDestinationConfig | null;
+    destinations?: RelayDestinationRef[];
   };
   /** The active variant for this run. The variant name is the run mode — flow
    *  code branches on this (e.g. "default", "delta", "full", "healthcheck"). */
@@ -359,6 +375,7 @@ export interface FlowWorkflowContext<TBody = unknown> {
     string,
     Record<string, Record<string, string>>
   >;
+  destinations?: RelayDestinationContext[];
   khotanRunId: string;
   khotanInstanceId: string;
 }
@@ -412,7 +429,7 @@ export interface FlowRegistration<TBody = unknown> {
    *  `default` variant carrying the top-level `schedule`. */
   variants?: Record<string, FlowVariant>;
   resource?: string;
-  to?: string;
+  to?: RelayDestinationConfig;
   workflow?: FlowWorkflowHandler<TBody>;
   run?(ctx: FlowRunContext<TBody>): Promise<FlowRunResult | undefined>;
 }
@@ -1421,8 +1438,10 @@ export type OutflowContext<TBody = unknown> = FlowWorkflowContext<TBody> & {
 export type RelayContext<TBody = unknown> = FlowWorkflowContext<TBody> & {
   flow: FlowWorkflowContext<TBody>["flow"] & {
     type: "relay";
-    to?: string | null;
+    to?: RelayDestinationConfig | null;
+    destinations: RelayDestinationRef[];
   };
+  destinations: RelayDestinationContext[];
 };
 
 export type InflowWorkflow<TBody = unknown> = (
@@ -1466,8 +1485,8 @@ export interface OutflowConfig<TBody = unknown> {
 export interface RelayConfig<TBody = unknown> {
   /** Unique name for this flow (used for DB tracking and Hub display) */
   name: string;
-  /** Name of the destination plug/system for humans and future tooling */
-  to: string;
+  /** Name of the destination plug/system, or multiple plugs for fan-out relays. */
+  to: RelayDestinationConfig;
   /** Logical resource this flow moves, e.g. "products" */
   resource?: string;
   /** Optional cron schedule. Mutually exclusive with `variants`. */

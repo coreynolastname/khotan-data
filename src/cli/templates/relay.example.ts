@@ -22,6 +22,7 @@ async function forwardProducts(ctx: RelayContext) {
   console.log("Starting relay", {
     flow: ctx.flow.name,
     to: ctx.flow.to,
+    destinations: ctx.destinations.map((destination) => destination.name),
     khotanRunId: ctx.khotanRunId,
     variant: ctx.variant,
   });
@@ -42,11 +43,16 @@ async function forwardProducts(ctx: RelayContext) {
   // TTL is configured on the cache definition (CacheRegistration.ttl), not per set().
   await snapshotCache.set("latest", records);
 
+  const destinationToken =
+    ctx.destinations[0]?.vars["destinationToken"] ??
+    ctx.vars["destinationToken"] ??
+    "";
+
   for (const record of records) {
     await fetch("https://destination.example.com/products", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${ctx.vars["destinationToken"] ?? ""}`,
+        Authorization: `Bearer ${destinationToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(record),
@@ -60,6 +66,7 @@ async function forwardProducts(ctx: RelayContext) {
     metadata: {
       relay: ctx.flow.name,
       to: ctx.flow.to,
+      destinations: ctx.destinations.map((destination) => destination.name),
       previousCount: previousRecords.length,
     },
   };
@@ -73,7 +80,7 @@ async function shopifyToHubspotWorkflow(ctx: RelayContext) {
 
 export const shopifyToHubspotRelay = relay({
   name: "shopify-to-hubspot-products",
-  to: "hubspot",
+  to: "hubspot", // or ["hubspot", "erp"] for fan-out
   resource: "products",
   schedule: "0 * * * *",
   workflow: shopifyToHubspotWorkflow,

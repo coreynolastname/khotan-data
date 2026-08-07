@@ -86,8 +86,11 @@ export const productsInflow = inflow({
 });
 ```
 
-Outflows query your DB and push out; relays read a source plug and write a
-destination plug. The step/workflow rules are identical for all three.
+Outflows query your DB and push out; relays read a source plug and write one
+destination plug, or multiple destination plugs with `to: [...]`. Relay
+workflow context includes `ctx.destinations`, which carries each destination
+name and selected vars for fan-out runs. The step/workflow rules are identical
+for all three.
 
 Return a `FlowRunResult` from the workflow, usually by returning the last
 `"use step"` result. Khotan observes that return value and finalizes
