@@ -72,6 +72,8 @@ import type {
   CacheRegistration,
   ResourceRegistration,
   FlowRegistration,
+  RelayDestinationContext,
+  RelayDestinationRef,
   PlugRegistration,
   WebhookRegistration,
   CatchRegistration,
@@ -508,6 +510,39 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     );
   }
 
+  function isReadonlyUnknownArray(value: unknown): value is readonly unknown[] {
+    return Array.isArray(value);
+  }
+
+  function getRelayDestinationNames(to: unknown): string[] {
+    const names: string[] = [];
+    if (typeof to === "string") {
+      names.push(to);
+    } else if (isReadonlyUnknownArray(to)) {
+      for (const value of to) {
+        if (typeof value === "string") names.push(value);
+      }
+    }
+
+    const seen = new Set<string>();
+    return names.filter((name) => {
+      if (name.length === 0 || seen.has(name)) {
+        return false;
+      }
+      seen.add(name);
+      return true;
+    });
+  }
+
+  function getRelayDestinationRefs(
+    to: FlowRegistration["to"] | null | undefined,
+  ): RelayDestinationRef[] {
+    return getRelayDestinationNames(to).map((name) => ({
+      name,
+      plugName: name,
+    }));
+  }
+
   function serializeFlowVariants(
     variants: Record<string, FlowVariant>,
   ): Record<string, { schedule?: string }> {
@@ -541,10 +576,15 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         : { [DEFAULT_VARIANT]: {} };
     const effectiveSchedule = getEffectiveDefaultSchedule(flow, variants);
     const to = flowConfig?.to ?? null;
-    const destinationPlug =
-      typeof to === "string"
-        ? (plugRows.find((plug) => plug["name"] === to) ?? null)
-        : null;
+    const destinationPlugs = getRelayDestinationNames(to).map((name) => {
+      const plug = plugRows.find((candidate) => candidate["name"] === name);
+      return {
+        name,
+        plugName: name,
+        plugId: typeof plug?.["id"] === "string" ? plug["id"] : null,
+      };
+    });
+    const primaryDestinationPlug = destinationPlugs[0] ?? null;
 
     return {
       ...flow,
@@ -552,8 +592,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       effectiveSchedule,
       variants: serializeFlowVariants(variants),
       to,
-      destinationPlugId: destinationPlug?.["id"] ?? null,
-      destinationPlugName: destinationPlug?.["name"] ?? to,
+      destinationPlugs,
+      destinationPlugId: primaryDestinationPlug?.plugId ?? null,
+      destinationPlugName: primaryDestinationPlug?.name ?? null,
     };
   }
 
@@ -575,7 +616,17 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     plugId: string,
   ): boolean {
     if (flow["plugId"] === plugId) return true;
-    return flow["type"] === "relay" && flow["destinationPlugId"] === plugId;
+    if (flow["type"] !== "relay") return false;
+    if (flow["destinationPlugId"] === plugId) return true;
+
+    const destinationPlugs = flow["destinationPlugs"];
+    return (
+      Array.isArray(destinationPlugs) &&
+      destinationPlugs.some((destination) => {
+        if (!destination || typeof destination !== "object") return false;
+        return (destination as Record<string, unknown>)["plugId"] === plugId;
+      })
+    );
   }
 
   function countAssociatedFlows(
@@ -2342,10 +2393,14 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       ...coerceStringRecord(requestBody["plugProfiles"]),
       ...coerceStringRecord(requestBody["plugTargets"]),
     };
+    const relayDestinationNames = getRelayDestinationNames(flowReg.to);
+    const relayDestinationRefs = getRelayDestinationRefs(flowReg.to);
     if (requestedRunProfile) {
       requestedPlugProfiles[plugName] ??= requestedRunProfile;
-      if (flowReg.to && plugNames.has(flowReg.to)) {
-        requestedPlugProfiles[flowReg.to] ??= requestedRunProfile;
+      for (const destinationName of relayDestinationNames) {
+        if (plugNames.has(destinationName)) {
+          requestedPlugProfiles[destinationName] ??= requestedRunProfile;
+        }
       }
     }
     const sourceProfile = getProfileSelection(
@@ -2376,6 +2431,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         type: flowReg.type,
         resource: flowReg.resource ?? null,
         to: flowReg.to ?? null,
+        ...(relayDestinationRefs.length > 0
+          ? { destinations: relayDestinationRefs }
+          : {}),
       },
       variant,
     };
@@ -2617,23 +2675,39 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         plugProfilesByName[plugName] = sourceProfile;
         plugVarProfilesByName[plugName] = { [sourceProfile]: vars };
       }
-      if (flowReg.to && plugNames.has(flowReg.to)) {
+      const destinations: RelayDestinationContext[] = [];
+      for (const destinationName of relayDestinationNames) {
         const destinationProfile = getProfileSelection(
-          flowReg.to,
-          selectionForProfile(requestedPlugProfiles[flowReg.to]),
+          destinationName,
+          selectionForProfile(requestedPlugProfiles[destinationName]),
         );
-        plugVarsByName[flowReg.to] = secret
-          ? await getVars(
-              flowReg.to,
-              destinationProfile ? { profile: destinationProfile } : undefined,
-            ).catch(() => ({}))
-          : {};
-        if (destinationProfile) {
-          plugProfilesByName[flowReg.to] = destinationProfile;
-          plugVarProfilesByName[flowReg.to] = {
-            [destinationProfile]: plugVarsByName[flowReg.to]!,
+        const destinationVars =
+          secret && plugNames.has(destinationName)
+            ? await getVars(
+                destinationName,
+                destinationProfile
+                  ? { profile: destinationProfile }
+                  : undefined,
+              ).catch(() => ({}))
+            : {};
+        plugVarsByName[destinationName] = destinationVars;
+        if (destinationProfile && plugNames.has(destinationName)) {
+          plugProfilesByName[destinationName] = destinationProfile;
+          plugVarProfilesByName[destinationName] = {
+            [destinationProfile]: destinationVars,
           };
         }
+
+        const destinationContext: RelayDestinationContext = {
+          name: destinationName,
+          plugName: destinationName,
+          vars: destinationVars,
+        };
+        if (destinationProfile) {
+          destinationContext.profile = destinationProfile;
+          destinationContext.target = destinationProfile;
+        }
+        destinations.push(destinationContext);
       }
 
       const flowContext = {
@@ -2643,6 +2717,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         type: flowReg.type,
         resource: flowReg.resource ?? null,
         to: flowReg.to ?? null,
+        ...(relayDestinationRefs.length > 0
+          ? { destinations: relayDestinationRefs }
+          : {}),
       };
 
       if (flowReg.workflow) {
@@ -2661,6 +2738,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
               target: sourceProfile,
               plugProfilesByName,
               plugVarProfilesByName,
+              ...(destinations.length > 0 ? { destinations } : {}),
               khotanRunId: runId,
               khotanInstanceId: instanceId,
             },
@@ -2706,6 +2784,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             body: runBody,
             vars,
             setVars: setFlowVars,
+            ...(destinations.length > 0 ? { destinations } : {}),
             cache: createCacheInstance,
             mapping: createMappingInstance,
           },
@@ -3415,6 +3494,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     const plugName =
       typeof flow["plugName"] === "string" ? flow["plugName"] : null;
     if (!plugName) return null;
+    const relayDestinationRefs = getRelayDestinationRefs(flowConfig.to);
     return {
       flow: {
         id: flowId,
@@ -3423,6 +3503,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         type: flowConfig.type,
         resource: flowConfig.resource ?? null,
         to: flowConfig.to ?? null,
+        ...(relayDestinationRefs.length > 0
+          ? { destinations: relayDestinationRefs }
+          : {}),
       },
       variant:
         typeof run["variant"] === "string" ? run["variant"] : DEFAULT_VARIANT,

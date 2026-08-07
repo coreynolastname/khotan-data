@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Khotan Relay Fan-out Visual</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17202a;
+        --muted: #617083;
+        --line: #c8d2df;
+        --panel: #ffffff;
+        --surface: #f4f7fb;
+        --source: #1f7a68;
+        --relay: #7257b6;
+        --runtime: #1c5d99;
+        --dest: #b0542c;
+        --ok: #16764f;
+        --warn: #985f05;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--surface);
+      }
+
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 28px 0 48px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 20px;
+        align-items: end;
+        margin-bottom: 20px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: clamp(28px, 4vw, 48px);
+        line-height: 1.02;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        font-size: 22px;
+        margin-bottom: 12px;
+      }
+
+      h3 {
+        font-size: 15px;
+        margin-bottom: 8px;
+      }
+
+      p {
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      code,
+      pre {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      .lede {
+        max-width: 820px;
+        margin-top: 12px;
+        font-size: 17px;
+      }
+
+      .mode-switch {
+        display: inline-grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .mode-switch button {
+        border: 0;
+        border-radius: 6px;
+        padding: 10px 14px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .mode-switch button[aria-pressed="true"] {
+        background: #17202a;
+        color: white;
+      }
+
+      .section {
+        margin-top: 18px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .diagram-shell {
+        overflow-x: auto;
+        padding: 8px 2px 2px;
+      }
+
+      .diagram {
+        min-width: 940px;
+        display: grid;
+        grid-template-columns: 180px 120px 220px 120px 1fr;
+        align-items: center;
+        gap: 0;
+      }
+
+      .node {
+        min-height: 112px;
+        border: 2px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        padding: 14px;
+        display: grid;
+        align-content: start;
+        gap: 6px;
+        box-shadow: 0 8px 20px rgba(23, 32, 42, 0.06);
+      }
+
+      .source {
+        border-color: color-mix(in srgb, var(--source) 56%, white);
+      }
+
+      .relay {
+        border-color: color-mix(in srgb, var(--relay) 56%, white);
+      }
+
+      .runtime {
+        border-color: color-mix(in srgb, var(--runtime) 56%, white);
+      }
+
+      .destination {
+        border-color: color-mix(in srgb, var(--dest) 56%, white);
+      }
+
+      .node-label {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .node-title {
+        font-size: 18px;
+        font-weight: 760;
+      }
+
+      .node-detail {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+
+      .connector {
+        height: 2px;
+        background: var(--line);
+        position: relative;
+      }
+
+      .connector::after {
+        content: "";
+        position: absolute;
+        right: -1px;
+        top: -5px;
+        width: 0;
+        height: 0;
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-left: 8px solid var(--line);
+      }
+
+      .destination-stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .destination-row {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+
+      .fanout-lines {
+        position: relative;
+        height: 100%;
+        min-height: 292px;
+      }
+
+      .fanout-lines span {
+        position: absolute;
+        left: 0;
+        right: 8px;
+        height: 2px;
+        background: var(--line);
+        transform-origin: left center;
+      }
+
+      .fanout-lines span::after {
+        content: "";
+        position: absolute;
+        right: -1px;
+        top: -5px;
+        width: 0;
+        height: 0;
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-left: 8px solid var(--line);
+      }
+
+      .fanout-lines .one {
+        top: 22%;
+        transform: rotate(-17deg);
+      }
+
+      .fanout-lines .two {
+        top: 50%;
+      }
+
+      .fanout-lines .three {
+        top: 78%;
+        transform: rotate(17deg);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .info {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: #fbfcfe;
+      }
+
+      .info strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .timeline {
+        display: grid;
+        gap: 10px;
+        counter-reset: step;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 42px 1fr;
+        gap: 12px;
+        align-items: start;
+      }
+
+      .step::before {
+        counter-increment: step;
+        content: counter(step);
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        background: #17202a;
+        font-weight: 760;
+      }
+
+      .code-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow-x: auto;
+        background: #10151b;
+        color: #f2f6fa;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .callout {
+        border-left: 4px solid var(--warn);
+        background: #fff8ec;
+        padding: 14px 16px;
+        border-radius: 6px;
+      }
+
+      .callout strong {
+        color: var(--warn);
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: #eaf7f0;
+        color: var(--ok);
+        font-weight: 700;
+        font-size: 13px;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      @media (max-width: 820px) {
+        header {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+
+        .grid,
+        .code-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="status">khotan-data relay model</div>
+          <h1>Relay vs Relay Fan-out</h1>
+          <p class="lede">
+            A relay moves data from one source plug to destination plug code.
+            Fan-out keeps the same source run, but gives the workflow a list of
+            destination contexts so it can deliver to several plugs in one run.
+          </p>
+        </div>
+        <div class="mode-switch" aria-label="Diagram mode">
+          <button id="singleButton" type="button" aria-pressed="true">
+            Single relay
+          </button>
+          <button id="fanoutButton" type="button" aria-pressed="false">
+            Fan-out relay
+          </button>
+        </div>
+      </header>
+
+      <section class="section">
+        <h2 id="diagramTitle">Single relay: one source, one destination</h2>
+        <div class="diagram-shell">
+          <div id="singleDiagram" class="diagram">
+            <div class="node source">
+              <div class="node-label">Source plug</div>
+              <div class="node-title">Cin7</div>
+              <div class="node-detail">
+                Owns the source API client and source vars.
+              </div>
+            </div>
+            <div class="connector"></div>
+            <div class="node relay">
+              <div class="node-label">Relay flow</div>
+              <div class="node-title">products-relay</div>
+              <div class="node-detail">
+                Config says <code>to: "pollinate"</code>.
+              </div>
+            </div>
+            <div class="connector"></div>
+            <div class="node destination">
+              <div class="node-label">Destination plug</div>
+              <div class="node-title">Pollinate</div>
+              <div class="node-detail">
+                Workflow binds or calls this destination.
+              </div>
+            </div>
+          </div>
+
+          <div id="fanoutDiagram" class="diagram hidden">
+            <div class="node source">
+              <div class="node-label">Source plug</div>
+              <div class="node-title">Cin7</div>
+              <div class="node-detail">
+                One run starts from one source plug.
+              </div>
+            </div>
+            <div class="connector"></div>
+            <div class="node relay">
+              <div class="node-label">Relay flow</div>
+              <div class="node-title">products-relay</div>
+              <div class="node-detail">
+                Config says <code>to: ["pollinate", "invoice"]</code>.
+              </div>
+            </div>
+            <div class="fanout-lines" aria-hidden="true">
+              <span class="one"></span>
+              <span class="two"></span>
+              <span class="three"></span>
+            </div>
+            <div class="destination-stack">
+              <div class="node destination">
+                <div class="node-label">Destination context</div>
+                <div class="node-title">Pollinate</div>
+                <div class="node-detail">
+                  Gets its own selected vars in
+                  <code>ctx.destinations[0].vars</code>.
+                </div>
+              </div>
+              <div class="node destination">
+                <div class="node-label">Destination context</div>
+                <div class="node-title">Invoice Agent</div>
+                <div class="node-detail">
+                  Gets its own selected vars in
+                  <code>ctx.destinations[1].vars</code>.
+                </div>
+              </div>
+              <div class="node destination">
+                <div class="node-label">Optional extra target</div>
+                <div class="node-title">Analytics</div>
+                <div class="node-detail">
+                  Add another plug name to the <code>to</code> array.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>What Khotan does at run start</h2>
+        <div class="timeline">
+          <div class="step">
+            <div>
+              <h3>Resolve the flow</h3>
+              <p>
+                Khotan finds the registered relay on the source plug and keeps
+                the configured <code>to</code> value. For fan-out, that value is
+                an array of plug names.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Load source and destination vars</h3>
+              <p>
+                The source vars become <code>ctx.vars</code>. Each destination
+                plug gets a separate entry in <code>ctx.destinations</code> and
+                <code>ctx.plugVarsByName</code>.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Call the workflow or inline run handler</h3>
+              <p>
+                Khotan passes plain JSON context into the relay code. The relay
+                code decides how to transform and send the data.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Finalize one Khotan run</h3>
+              <p>
+                The workflow returns counters and metadata. Khotan records the
+                run once, even if the workflow delivered to several
+                destinations.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Single relay and fan-out relay config</h2>
+        <div class="code-grid">
+          <pre><code>relay({
+  name: "products-relay",
+  to: "pollinate",
+  resource: "products",
+  workflow: productsRelayWorkflow,
+});</code></pre>
+          <pre><code>relay({
+  name: "products-relay",
+  to: ["pollinate", "invoice-agent"],
+  resource: "products",
+  workflow: productsRelayWorkflow,
+});</code></pre>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>What the workflow receives</h2>
+        <div class="grid">
+          <div class="info">
+            <strong><code>ctx.flow.to</code></strong>
+            <p>
+              The original destination config. It is a string for single relay
+              and an array for fan-out.
+            </p>
+          </div>
+          <div class="info">
+            <strong><code>ctx.flow.destinations</code></strong>
+            <p>
+              A lightweight list of destination refs:
+              <code>{ name, plugName }</code>.
+            </p>
+          </div>
+          <div class="info">
+            <strong><code>ctx.destinations</code></strong>
+            <p>
+              Runtime destination contexts. Each entry includes
+              <code>vars</code>, and profile/target when selected.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Fan-out workflow shape</h2>
+        <pre><code>async function forwardProducts(ctx: RelayContext) {
+  "use step";
+
+  const records = await readProductsFromSource(ctx.vars);
+
+  for (const destination of ctx.destinations) {
+    if (destination.name === "pollinate") {
+      await sendToPollinate(records, destination.vars);
+    }
+
+    if (destination.name === "invoice-agent") {
+      const invoices = productsToInvoiceDrafts(records);
+      await sendToInvoiceAgent(invoices, destination.vars);
+    }
+  }
+
+  return {
+    extracted: records.length,
+    transformed: records.length,
+    created: records.length,
+    metadata: {
+      destinations: ctx.destinations.map((d) => d.name),
+    },
+  };
+}</code></pre>
+      </section>
+
+      <section class="section callout">
+        <p>
+          <strong>Important:</strong> fan-out does not automatically POST to
+          every plug for you. Khotan resolves the destination list and injects
+          destination vars. Your relay workflow still owns the transform,
+          validation, API calls, batching, idempotency, and per-destination
+          error handling.
+        </p>
+      </section>
+    </main>
+
+    <script>
+      const singleButton = document.getElementById("singleButton");
+      const fanoutButton = document.getElementById("fanoutButton");
+      const singleDiagram = document.getElementById("singleDiagram");
+      const fanoutDiagram = document.getElementById("fanoutDiagram");
+      const diagramTitle = document.getElementById("diagramTitle");
+
+      function setMode(mode) {
+        const fanout = mode === "fanout";
+        singleButton.setAttribute("aria-pressed", String(!fanout));
+        fanoutButton.setAttribute("aria-pressed", String(fanout));
+        singleDiagram.classList.toggle("hidden", fanout);
+        fanoutDiagram.classList.toggle("hidden", !fanout);
+        diagramTitle.textContent = fanout
+          ? "Fan-out relay: one source, many destination contexts"
+          : "Single relay: one source, one destination";
+      }
+
+      singleButton.addEventListener("click", () => setMode("single"));
+      fanoutButton.addEventListener("click", () => setMode("fanout"));
+    </script>
+  </body>
+</html>

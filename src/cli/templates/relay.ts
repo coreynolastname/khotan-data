@@ -4,7 +4,7 @@
 //
 // This file keeps local imports stable while reusing the real builder and types
 // from khotan-data/factory. Create per-service flow files using relay() to read
-// from the source plug and forward to a destination system with durable,
+// from the source plug and forward to one or more destination systems with durable,
 // retryable Vercel Workflow steps.
 // ============================================================================
 
@@ -37,6 +37,7 @@ export type {
 //   console.log("Starting relay", {
 //     flow: ctx.flow.name,
 //     to: ctx.flow.to,
+//     destinations: ctx.destinations.map((destination) => destination.name),
 //     khotanRunId: ctx.khotanRunId,
 //     variant: ctx.variant,
 //   });
@@ -62,6 +63,7 @@ export type {
 //     metadata: {
 //       relay: ctx.flow.name,
 //       to: ctx.flow.to,
+//       destinations: ctx.destinations.map((destination) => destination.name),
 //       previousCount: previous?.length ?? 0,
 //     },
 //   };
@@ -75,7 +77,7 @@ export type {
 //
 // export const shopifyToHubspotRelay = relay({
 //   name: "shopify-to-hubspot-products",
-//   to: "hubspot",
+//   to: "hubspot", // or ["hubspot", "erp"] for fan-out
 //   resource: "products",
 //   schedule: "0 * * * *",
 //   workflow: shopifyToHubspotWorkflow,

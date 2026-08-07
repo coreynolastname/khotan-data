@@ -64,7 +64,13 @@ interface FlowRecord {
   plugName?: string | null;
   lastRunStatus?: RunStatus;
   lastRunAt?: string | null;
-  to?: string | null;
+  to?: string | string[] | null;
+  destinationPlugId?: string | null;
+  destinationPlugs?: Array<{
+    name: string;
+    plugName: string;
+    plugId: string | null;
+  }>;
 }
 
 interface WebhookHandlerRecord {
@@ -446,21 +452,60 @@ function buildTopologyModel(snapshot: TopologySnapshot): TopologyModel {
       label: edgeLabel("relay"),
     });
 
-    const relayTargetId = resolvePlugNodeId(
-      plugsById,
-      plugsByName,
-      null,
-      flow.to ?? null,
-    );
+    const relayDestinations =
+      flow.destinationPlugs && flow.destinationPlugs.length > 0
+        ? flow.destinationPlugs
+        : (Array.isArray(flow.to)
+            ? flow.to
+            : typeof flow.to === "string"
+              ? [flow.to]
+              : []
+          ).map((name) => ({ name, plugName: name, plugId: null }));
 
-    if (relayTargetId) {
-      edges.push({
-        id: `edge:relay-destination:${flow.id}`,
-        source: `flow:${flow.id}`,
-        target: relayTargetId,
-        category: "relay",
-        health,
-        label: edgeLabel("relay"),
+    if (relayDestinations.length > 0) {
+      relayDestinations.forEach((destination, index) => {
+        const relayTargetId = resolvePlugNodeId(
+          plugsById,
+          plugsByName,
+          destination.plugId,
+          destination.name,
+        );
+
+        if (relayTargetId) {
+          edges.push({
+            id: `edge:relay-destination:${flow.id}:${index}`,
+            source: `flow:${flow.id}`,
+            target: relayTargetId,
+            category: "relay",
+            health,
+            label: edgeLabel("relay"),
+          });
+          return;
+        }
+
+        const fallbackRelayNodeId = `plug:virtual:relay:${flow.id}:${index}`;
+        nodes.push({
+          id: fallbackRelayNodeId,
+          entityId: fallbackRelayNodeId,
+          category: "plug",
+          lane: "destination",
+          label: "Destination unavailable",
+          subtitle: "Relay target is not exposed by the current API payload",
+          detail: destination.name,
+          health: "idle",
+          muted: true,
+          ownerPlugId: flow.plugId,
+          isVirtual: true,
+        });
+        edges.push({
+          id: `edge:relay-fallback:${flow.id}:${index}`,
+          source: `flow:${flow.id}`,
+          target: fallbackRelayNodeId,
+          category: "relay",
+          health,
+          label: "relay target",
+          fallback: true,
+        });
       });
       continue;
     }
@@ -473,7 +518,7 @@ function buildTopologyModel(snapshot: TopologySnapshot): TopologyModel {
       lane: "destination",
       label: "Destination unavailable",
       subtitle: "Relay target is not exposed by the current API payload",
-      detail: flow.to ?? "scaffolded relay destination",
+      detail: "scaffolded relay destination",
       health: "idle",
       muted: true,
       ownerPlugId: flow.plugId,
