@@ -87,6 +87,7 @@ import type {
   StuckRunReconcileOptions,
   StuckRunReconcileResult,
   StuckRunReconcileItem,
+  KhotanReconciledRunStatus,
   KhotanRunStatus,
   KhotanTerminalRunUpdate,
   KhotanPersistedRunUpdateInput,
@@ -2420,7 +2421,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
 
     await adapter.updateFlowLastRun(flowId, {
       lastRunAt: new Date(startedAt),
-      lastRunStatus: "running" as KhotanTerminalRunStatus,
+      lastRunStatus: "running",
     });
 
     const hookContext: FlowHookContext = {
@@ -3541,6 +3542,97 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     };
   }
 
+  /**
+   * Map an execution-engine status string onto a khotan run status.
+   * `null` means the engine still considers the run in flight, so the row must
+   * be left alone; `undefined` means the status was unrecognized.
+   */
+  function mapEngineStatus(
+    engineStatus: string,
+  ): KhotanReconciledRunStatus | null | undefined {
+    switch (engineStatus.trim().toLowerCase()) {
+      case "completed":
+      case "complete":
+      case "succeeded":
+      case "success":
+        return "completed";
+      case "failed":
+      case "failure":
+      case "errored":
+        return "failed";
+      case "cancelled":
+      case "canceled":
+      case "aborted":
+        return "cancelled";
+      case "running":
+      case "pending":
+      case "queued":
+      case "suspended":
+      case "waiting":
+        return null;
+      default:
+        return undefined;
+    }
+  }
+
+  interface EngineOutcome {
+    status: KhotanReconciledRunStatus | null;
+    engineStatus: string | null;
+    result: FlowRunResult | null;
+  }
+
+  /**
+   * Ask the workflow engine what actually happened to a run. The run row is the
+   * only place khotan records outcomes, and for workflow-backed flows it is
+   * written by an observer bound to the triggering invocation — which dies long
+   * before a long run finishes. The engine outlives that, so it is the source
+   * of truth when reconciling.
+   */
+  async function getEngineOutcome(
+    workflowRunId: string | null,
+  ): Promise<EngineOutcome | null> {
+    if (!workflowRunId) return null;
+
+    let handle: ReturnType<Awaited<ReturnType<typeof importWorkflowGetRun>>>;
+    try {
+      const getRun = await importWorkflowGetRun();
+      handle = getRun(workflowRunId);
+    } catch (error) {
+      kd("flow", `Engine lookup failed for workflow run ${workflowRunId}`, error);
+      return null;
+    }
+
+    let engineStatus: string | null = null;
+    try {
+      engineStatus = handle.status ? await handle.status : null;
+    } catch (error) {
+      kd("flow", `Engine status unavailable for run ${workflowRunId}`, error);
+      return null;
+    }
+    if (!engineStatus) return null;
+
+    const mapped = mapEngineStatus(engineStatus);
+    if (mapped === undefined) {
+      kd("flow", `Unrecognized engine status "${engineStatus}"`);
+      return null;
+    }
+    if (mapped === null) return { status: null, engineStatus, result: null };
+
+    // Recover the counters the lost observer never got to write.
+    let result: FlowRunResult | null = null;
+    if (mapped === "completed") {
+      try {
+        result = handle.returnValue
+          ? (toFlowRunResult(await handle.returnValue) ?? null)
+          : null;
+      } catch (error) {
+        kd("flow", `Engine returnValue unavailable for ${workflowRunId}`, error);
+      }
+    }
+
+    return { status: mapped, engineStatus, result };
+  }
+
   async function reconcileStuckRuns(
     options: StuckRunReconcileOptions = {},
   ): Promise<StuckRunReconcileResult> {
@@ -3558,13 +3650,14 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       (status): status is "pending" | "running" =>
         status === "pending" || status === "running",
     );
-    const toStatus = options.status ?? "failed";
+    const toStatus = options.status ?? "abandoned";
     const dryRun = options.dryRun ?? false;
-    const error =
+    const reconcileFromEngine = options.reconcileFromEngine ?? true;
+    const fallbackError =
       options.error ??
       `Marked ${toStatus} by khotan stuck-run reconciliation after ${String(
         olderThanMs,
-      )}ms`;
+      )}ms; the execution engine did not report a terminal status`;
 
     if (statuses.length === 0) {
       return {
@@ -3573,6 +3666,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         checked: 0,
         reconciled: 0,
         skipped: 0,
+        inFlight: 0,
         olderThan: olderThan.toISOString(),
         items: [],
       };
@@ -3594,6 +3688,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     const items: StuckRunReconcileItem[] = [];
     let reconciled = 0;
     let skipped = 0;
+    let inFlight = 0;
 
     for (const run of candidates) {
       const runId = getRunId(run);
@@ -3610,21 +3705,47 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       const startedAt = coerceDate(run["startedAt"]);
       const durationMs = startedAt ? now.getTime() - startedAt.getTime() : null;
       const flowId = getRunFlowId(run);
+      const workflowRunId = getRunWorkflowId(run);
+
+      // Prefer the engine's account of the run over inferring from age.
+      const outcome = reconcileFromEngine
+        ? await getEngineOutcome(workflowRunId)
+        : null;
+
+      // The engine says it is still running — a legitimately long run, not a
+      // stuck row. Marking it terminal here would be the same lie in reverse.
+      if (outcome?.status === null) {
+        inFlight++;
+        continue;
+      }
+
+      const resolvedStatus = outcome?.status ?? toStatus;
+      const engineResult = outcome?.result ?? null;
+      const error =
+        outcome?.status != null
+          ? (engineResult?.error ??
+            `Recovered from execution engine (status: ${String(
+              outcome.engineStatus,
+            )})`)
+          : fallbackError;
+
       const item: StuckRunReconcileItem = {
         id: runId,
         flowId,
-        workflowRunId: getRunWorkflowId(run),
+        workflowRunId,
         variant:
           typeof run["variant"] === "string" ? run["variant"] : DEFAULT_VARIANT,
         source: coerceRunSource(run["source"]),
         previousStatus,
-        status: toStatus,
+        status: resolvedStatus,
         startedAt,
         completedAt: now,
         durationMs,
         error,
         dryRun,
         reconciled: false,
+        statusSource: outcome?.status != null ? "engine" : "timeout",
+        engineStatus: outcome?.engineStatus ?? null,
       };
 
       if (dryRun) {
@@ -3637,7 +3758,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
             runId,
             olderThan,
             fromStatuses: statuses,
-            toStatus,
+            toStatus: resolvedStatus,
             completedAt: now,
             durationMs,
             error,
@@ -3648,10 +3769,10 @@ export function khotan(config: KhotanConfig): KhotanInstance {
               return false;
             }
             await adapter.updateRun(runId, {
-              status: toStatus,
+              status: resolvedStatus,
               completedAt: now,
               ...(durationMs !== null ? { durationMs } : {}),
-              failed: toStatus === "failed" ? 1 : 0,
+              failed: resolvedStatus === "failed" ? 1 : 0,
               error,
             });
             return true;
@@ -3663,6 +3784,19 @@ export function khotan(config: KhotanConfig): KhotanInstance {
         continue;
       }
 
+      // The run is claimed; now restore the counters the lost observer never
+      // wrote. Only the engine can supply these, so this is skipped on timeout.
+      const recoveredCounters = engineResult
+        ? getFlowRunCounters(engineResult)
+        : null;
+      if (recoveredCounters) {
+        await adapter.updateRun(runId, {
+          status: resolvedStatus,
+          ...recoveredCounters,
+          ...(engineResult?.metadata ? { metadata: engineResult.metadata } : {}),
+        });
+      }
+
       item.reconciled = true;
       reconciled++;
       items.push(item);
@@ -3670,20 +3804,20 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       if (flowId) {
         await adapter.updateFlowLastRun(flowId, {
           lastRunAt: now,
-          lastRunStatus: toStatus,
+          lastRunStatus: resolvedStatus,
         });
       }
 
+      const counters = recoveredCounters ?? getRunCountersFromRecord(run);
       const hookContext = await getFlowHookContextForRun(run);
       await emitFactoryFlowHook(hookContext, {
         id: runId,
-        status: toStatus,
+        status: resolvedStatus,
         variant: item.variant,
         source: item.source,
         durationMs: durationMs ?? 0,
-        ...getRunCountersFromRecord(run),
-        failed:
-          toStatus === "failed" ? 1 : getRunCountersFromRecord(run).failed,
+        ...counters,
+        failed: resolvedStatus === "failed" ? 1 : counters.failed,
         error,
       });
     }
@@ -3694,6 +3828,7 @@ export function khotan(config: KhotanConfig): KhotanInstance {
       checked: candidates.length,
       reconciled,
       skipped,
+      inFlight,
       olderThan: olderThan.toISOString(),
       items,
     };
@@ -3708,7 +3843,11 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     if (typeof body["limit"] === "number") {
       options.limit = body["limit"];
     }
-    if (body["status"] === "failed" || body["status"] === "cancelled") {
+    if (
+      body["status"] === "failed" ||
+      body["status"] === "cancelled" ||
+      body["status"] === "abandoned"
+    ) {
       options.status = body["status"];
     }
     if (typeof body["error"] === "string") {
@@ -3716,6 +3855,9 @@ export function khotan(config: KhotanConfig): KhotanInstance {
     }
     if (typeof body["dryRun"] === "boolean") {
       options.dryRun = body["dryRun"];
+    }
+    if (typeof body["reconcileFromEngine"] === "boolean") {
+      options.reconcileFromEngine = body["reconcileFromEngine"];
     }
     if (Array.isArray(body["statuses"])) {
       options.statuses = body["statuses"].filter(

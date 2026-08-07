@@ -32,7 +32,8 @@ interface RunLogItem {
     | "completed"
     | "partial"
     | "failed"
-    | "cancelled";
+    | "cancelled"
+    | "abandoned";
   workflowRunId: string | null;
   sourceType: "flow" | "webhook" | "unknown";
   sourceName: string | null;
@@ -72,6 +73,8 @@ const statusVariant = {
   partial: "secondary",
   failed: "destructive",
   cancelled: "outline",
+  // Outcome unknown, not a failure — reconciliation could not establish it.
+  abandoned: "outline",
 } as const;
 
 const statusLabel = {
@@ -81,6 +84,7 @@ const statusLabel = {
   partial: "partial",
   failed: "failed",
   cancelled: "cancelled",
+  abandoned: "abandoned",
 } as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

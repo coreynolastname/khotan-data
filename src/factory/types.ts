@@ -41,12 +41,21 @@ export type KhotanRunStatus =
   | "completed"
   | "partial"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "abandoned";
 export type KhotanTerminalRunStatus =
   | "completed"
   | "partial"
   | "failed"
   | "cancelled";
+
+/**
+ * Statuses reconciliation may write. Adds `abandoned` — the run outlived its
+ * observer and the execution engine could not tell us the real outcome, so it
+ * is genuinely unknown and must not be reported as `failed`. Flows themselves
+ * never return `abandoned`, which is why it is not in KhotanTerminalRunStatus.
+ */
+export type KhotanReconciledRunStatus = KhotanTerminalRunStatus | "abandoned";
 
 export interface FlowRunResult {
   status?: KhotanTerminalRunStatus;
@@ -255,7 +264,11 @@ export interface FlowHookContext {
 /** Compact summary of a finished run, passed to variant lifecycle hooks. */
 export interface RunSummary {
   id: string;
-  status: KhotanTerminalRunStatus;
+  /**
+   * Includes `abandoned` for summaries emitted by stuck-run reconciliation,
+   * where the real outcome could not be established.
+   */
+  status: KhotanReconciledRunStatus;
   variant: string;
   source: RunSource;
   durationMs: number;
@@ -957,7 +970,7 @@ export interface KhotanAdapter {
     runId: string;
     olderThan: Date;
     fromStatuses: ("pending" | "running")[];
-    toStatus: KhotanTerminalRunStatus;
+    toStatus: KhotanReconciledRunStatus;
     completedAt: Date;
     durationMs?: number | null;
     error: string;
@@ -1176,7 +1189,7 @@ export interface KhotanAdapter {
     flowId: string,
     updates: {
       lastRunAt: Date;
-      lastRunStatus: KhotanTerminalRunStatus;
+      lastRunStatus: KhotanReconciledRunStatus | "running";
     },
   ): Promise<void>;
 }
@@ -1300,10 +1313,21 @@ export interface StuckRunReconcileOptions {
   olderThanMs?: number;
   limit?: number;
   statuses?: ("pending" | "running")[];
-  status?: Extract<KhotanTerminalRunStatus, "failed" | "cancelled">;
+  /**
+   * Status to write when the execution engine cannot supply the real outcome.
+   * Defaults to `abandoned` — a stuck row maps to engine-completed runs as
+   * often as engine-failed ones, so `failed` would assert something untrue.
+   */
+  status?: Extract<KhotanReconciledRunStatus, "failed" | "cancelled" | "abandoned">;
   error?: string;
   dryRun?: boolean;
   now?: Date;
+  /**
+   * Ask the workflow engine for each run's true terminal status before falling
+   * back to `status`. Runs the engine still reports as in-flight are left
+   * alone. Defaults to true; set false to restore pure time-based sweeping.
+   */
+  reconcileFromEngine?: boolean;
 }
 
 export interface StuckRunReconcileItem {
@@ -1313,13 +1337,20 @@ export interface StuckRunReconcileItem {
   variant: string;
   source: RunSource;
   previousStatus: KhotanRunStatus;
-  status: KhotanTerminalRunStatus;
+  status: KhotanReconciledRunStatus;
   startedAt: Date | null;
   completedAt: Date;
   durationMs: number | null;
   error: string;
   dryRun: boolean;
   reconciled: boolean;
+  /**
+   * Where `status` came from: `engine` means the workflow engine reported the
+   * real outcome, `timeout` means it was inferred from age alone.
+   */
+  statusSource: "engine" | "timeout";
+  /** Raw status string the engine reported, when it was reachable. */
+  engineStatus?: string | null;
 }
 
 export interface StuckRunReconcileResult {
@@ -1328,6 +1359,8 @@ export interface StuckRunReconcileResult {
   checked: number;
   reconciled: number;
   skipped: number;
+  /** Candidates the engine still reports as in-flight; deliberately untouched. */
+  inFlight: number;
   olderThan: string;
   items: StuckRunReconcileItem[];
 }

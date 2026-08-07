@@ -5312,15 +5312,15 @@ describe("khotan factory", () => {
       const runs = (await runsRes.json()) as Array<Record<string, unknown>>;
       expect(runs[0]).toMatchObject({
         id: "run-1",
-        status: "failed",
+        status: "abandoned",
         error: "stale worker",
-        failed: 1,
+        failed: 0,
         updated: 0,
       });
       expect(onFlowRunFailed).toHaveBeenCalledTimes(1);
       expect(onFlowRunFailed.mock.calls[0]![1]).toMatchObject({
         id: "run-1",
-        status: "failed",
+        status: "abandoned",
         error: "stale worker",
       });
       expect(onFlowRunComplete).not.toHaveBeenCalled();
@@ -5328,6 +5328,188 @@ describe("khotan factory", () => {
         "run-1",
         expect.objectContaining({ status: "completed" }),
       );
+    });
+
+    it("recovers the real status and counters from the engine for a stuck run", async () => {
+      // The triggering invocation dies before a long workflow finishes, so
+      // nothing writes the terminal status. The engine still knows it, and
+      // reconciliation must adopt that rather than guessing from age.
+      const workflow = vi.fn(async () => undefined);
+      __setWorkflowStartForTests(
+        vi.fn(async () => ({
+          runId: "workflow-run-1",
+          // No returnValue: the observer never got one before teardown.
+        })),
+      );
+      // First lookup is the in-request observer, which finds nothing to await
+      // and is then torn down with the invocation. Later lookups are the
+      // reconciler, by which time the engine has the finished run.
+      let engineLookups = 0;
+      __setWorkflowGetRunForTests(
+        vi.fn(() => {
+          engineLookups += 1;
+          if (engineLookups === 1) return {};
+          return {
+            status: Promise.resolve("completed"),
+            returnValue: Promise.resolve({
+              extracted: 2759,
+              created: 2759,
+              metadata: { recovered: true },
+            }),
+          };
+        }),
+      );
+      const onFlowRunComplete = vi.fn();
+      const onFlowRunFailed = vi.fn();
+
+      const flowInstance = khotan({
+        adapter,
+        authorize: false,
+        onFlowRunComplete,
+        onFlowRunFailed,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow", workflow }],
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST"),
+      );
+      const run = await adapter.getRun("run-1");
+      run!["startedAt"] = new Date(Date.now() - 60 * 60_000);
+
+      const result = await flowInstance.reconcileStuckRuns({
+        olderThanMs: 10 * 60_000,
+      });
+
+      expect(result).toMatchObject({ checked: 1, reconciled: 1, inFlight: 0 });
+      expect(result.items[0]).toMatchObject({
+        status: "completed",
+        statusSource: "engine",
+        engineStatus: "completed",
+      });
+
+      const settled = await adapter.getRun("run-1");
+      expect(settled).toMatchObject({
+        status: "completed",
+        extracted: 2759,
+        created: 2759,
+      });
+      expect(onFlowRunComplete).toHaveBeenCalledTimes(1);
+      expect(onFlowRunFailed).not.toHaveBeenCalled();
+      flowInstance.dispose();
+    });
+
+    it("leaves a run alone when the engine still reports it in flight", async () => {
+      // A legitimately long run is not a stuck row. Marking it terminal would
+      // be the same false report in the opposite direction.
+      const workflow = vi.fn(async () => undefined);
+      __setWorkflowStartForTests(
+        vi.fn(async () => ({ runId: "workflow-run-1" })),
+      );
+      __setWorkflowGetRunForTests(
+        vi.fn(() => ({ status: Promise.resolve("running") })),
+      );
+
+      const flowInstance = khotan({
+        adapter,
+        authorize: false,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow", workflow }],
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST"),
+      );
+      const run = await adapter.getRun("run-1");
+      run!["startedAt"] = new Date(Date.now() - 60 * 60_000);
+
+      const result = await flowInstance.reconcileStuckRuns({
+        olderThanMs: 10 * 60_000,
+      });
+
+      expect(result).toMatchObject({ checked: 1, reconciled: 0, inFlight: 1 });
+      expect(await adapter.getRun("run-1")).toMatchObject({
+        status: "running",
+      });
+      flowInstance.dispose();
+    });
+
+    it("falls back to abandoned, not failed, when the engine cannot be reached", async () => {
+      const workflow = vi.fn(async () => undefined);
+      __setWorkflowStartForTests(
+        vi.fn(async () => ({ runId: "workflow-run-1" })),
+      );
+      __setWorkflowGetRunForTests(
+        vi.fn(() => {
+          throw new Error("engine unreachable");
+        }),
+      );
+
+      const flowInstance = khotan({
+        adapter,
+        authorize: false,
+        plugs: [
+          {
+            name: "stripe",
+            plug: {
+              baseUrl: "https://api.stripe.com",
+              authType: "bearer",
+              get: vi.fn(),
+              post: vi.fn(),
+              put: vi.fn(),
+              patch: vi.fn(),
+              delete: vi.fn(),
+            },
+            flows: [{ name: "products", type: "inflow", workflow }],
+          },
+        ],
+      });
+
+      await flowInstance.init();
+      await flowInstance.handler(
+        makeRequest("/api/khotan/flows/flow-1/runs", "POST"),
+      );
+      const run = await adapter.getRun("run-1");
+      run!["startedAt"] = new Date(Date.now() - 60 * 60_000);
+
+      const result = await flowInstance.reconcileStuckRuns({
+        olderThanMs: 10 * 60_000,
+      });
+
+      expect(result).toMatchObject({ checked: 1, reconciled: 1 });
+      expect(result.items[0]).toMatchObject({ statusSource: "timeout" });
+      expect(await adapter.getRun("run-1")).toMatchObject({
+        status: "abandoned",
+      });
+      flowInstance.dispose();
     });
 
     it("POST /api/khotan/flows/:id/runs reconciles cancelled workflow runs", async () => {

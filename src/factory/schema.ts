@@ -88,7 +88,16 @@ export const khotanFlows = pgTable(
     resourceId: text("resource_id"),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
     lastRunStatus: text("last_run_status", {
-      enum: ["completed", "partial", "failed", "cancelled"],
+      // "running" is written while a run is in flight; "abandoned" by stuck-run
+      // reconciliation. Plain text column, so widening needs no migration.
+      enum: [
+        "running",
+        "completed",
+        "partial",
+        "failed",
+        "cancelled",
+        "abandoned",
+      ],
     }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
@@ -250,6 +259,9 @@ export const khotanRuns = pgTable(
         "partial",
         "failed",
         "cancelled",
+        // Written only by stuck-run reconciliation when the real outcome is
+        // unknown. Plain text column, so widening needs no migration.
+        "abandoned",
       ],
     })
       .default("pending")

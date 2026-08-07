@@ -55,6 +55,7 @@ interface Flow {
     | "partial"
     | "failed"
     | "cancelled"
+    | "abandoned"
     | null;
   plugName: string | null;
   to?: string | string[] | null;
@@ -83,6 +84,7 @@ interface WebhookHandler {
     | "partial"
     | "failed"
     | "cancelled"
+    | "abandoned"
     | null;
   createdAt: string;
   updatedAt: string;
@@ -111,6 +113,8 @@ const runStatusVariant: Record<string, StatusVariant> = {
   partial: "secondary",
   failed: "destructive",
   cancelled: "outline",
+  // Outcome unknown, not a failure — reconciliation could not establish it.
+  abandoned: "outline",
 };
 
 function getRelayDestinationNames(flow: Flow) {

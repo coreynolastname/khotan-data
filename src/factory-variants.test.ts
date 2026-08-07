@@ -569,15 +569,17 @@ describe("stuck-run reconciliation", () => {
       reconciled: 1,
       skipped: 0,
     });
+    // No workflow run id to ask the engine about, so the outcome is genuinely
+    // unknown and must not be asserted as `failed`.
     expect(runStore.get(id)).toMatchObject({
-      status: "failed",
+      status: "abandoned",
       error: "stale worker",
-      failed: 1,
+      failed: 0,
     });
     expect(onFlowRunFailed).toHaveBeenCalledTimes(1);
     expect(onFlowRunFailed.mock.calls[0]![1]).toMatchObject({
       id,
-      status: "failed",
+      status: "abandoned",
       error: "stale worker",
     });
     instance.dispose();

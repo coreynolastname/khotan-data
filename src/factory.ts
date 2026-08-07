@@ -14,6 +14,7 @@ export type {
   RelayDestinationContext,
   KhotanRunStatus,
   KhotanTerminalRunStatus,
+  KhotanReconciledRunStatus,
   FlowRunResult,
   WebhookEventStatus,
   WebhookDuplicatePolicy,
