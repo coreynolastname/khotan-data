@@ -616,6 +616,9 @@ describe("CLI", { timeout: 30_000 }, () => {
       expect(authContent).toContain("genericOAuth");
       expect(authContent).toContain("oAuthProxy");
       expect(authContent).toContain("authorizeKhotanRequest");
+      expect(authContent).toContain(
+        "if (allowedEmails.length === 0) return false;",
+      );
 
       const khotanContent = fs.readFileSync(khotanPath, "utf-8");
       expect(khotanContent).toContain(
