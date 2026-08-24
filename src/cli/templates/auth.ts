@@ -29,6 +29,7 @@ export const auth = betterAuth({
       ],
     }),
     oAuthProxy(),
+    
   ],
 });
 
@@ -41,7 +42,7 @@ export async function authorizeKhotanRequest(
   const allowedEmails = commaList(process.env.KHOTAN_ADMIN_EMAILS).map(
     (email) => email.toLowerCase(),
   );
-  if (allowedEmails.length === 0) return true;
+  if (allowedEmails.length === 0) return false;
 
   const email = session.user.email;
   return (
